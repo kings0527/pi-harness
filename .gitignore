@@ -3,3 +3,4 @@ dist/
 .pi-board/
 *.tmp
 .DS_Store
+.pi/

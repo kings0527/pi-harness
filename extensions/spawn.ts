@@ -8,7 +8,7 @@ export default async function(pi: any) {
   pi.registerTool({
     name: "spawn",
     label: "Spawn Subagents",
-    description: "Spawn role-carded subagents that investigate in parallel and post findings to the board. Actions: list (available profiles), run (agents: [{profile, task}], topic must be open).",
+    description: "Spawn role-carded subagents that investigate in parallel and post findings to the board. Actions: list (available profiles), run (agents: [{profile, task}], topic must be open). Spawn parallel agents proactively when a task has independent investigation directions.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("list"),
