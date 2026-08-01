@@ -61,7 +61,7 @@ export default async function(pi: any) {
               const status = r.timedOut ? "TIMED OUT" : `exit ${r.exitCode}`;
               return `## ${r.name} (${status})\n${r.output || "(no output)"}`;
             }).join("\n\n");
-            return { content: [{ type: "text" as const, text: `${formatted}\n\n---\nUse board read ${params.topic} to see the findings they posted.` }] };
+            return { content: [{ type: "text" as const, text: `${formatted}\n\n---\nNow \`board read ${params.topic}\` to check convergence — if gaps remain, spawn another round.` }] };
           }
           default:
             throw new Error(`Unknown action: ${params.action}`);
