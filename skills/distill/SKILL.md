@@ -36,22 +36,23 @@ For each candidate that passes Step 2:
    - Follow existing structure if the domain already has entries
    - Create new directories as needed
 
-2. **Write the entry** with mandatory source link:
+2. **Write the entry** with mandatory source link (the `board` tool's `distill` action):
    ```
-   board distill --topic <topic-id> --path <knowledge-path> --source "topic-<id>#seq-<N>,seq-<M>" --description "<one-line for index>"
+   board action=distill path=<knowledge-path> content="<full entry markdown>" source="topic-<id>#seq-<N>,seq-<M>" description="<one-line for index>"
    ```
+   Entries without a `source` are rejected by the runtime.
 
 3. **Check for conflicts**: If the new finding contradicts an existing entry in `knowledge/`:
    - DO NOT modify or overwrite the existing entry
-   - Instead, mark it as CONFLICT:
+   - Instead, mark it as CONFLICT (the `board` tool's `distill-conflict` action — it only appends a CONFLICT block, never rewrites):
    ```
-   board distill-conflict --path <existing-path> --source "topic-<id>#seq-<N>" --description "<what contradicts>"
+   board action=distill-conflict path=<existing-path> source="topic-<id>#seq-<N>" description="<what contradicts>"
    ```
-   - Then add the new finding as a separate entry
+   - Then add the new finding as a separate entry (`action=distill` with a different path)
 
 ### Step 4: Update Index
 
-The `board distill` command automatically updates `knowledge/index.md`. Verify the index after completion.
+The `distill` action automatically updates `knowledge/index.md`. Verify the index after completion.
 
 ## Rules (MUST)
 
