@@ -14,8 +14,11 @@ You have a multi-agent collaboration system: a shared blackboard (`board` tool) 
 - The user is just asking a question or chatting.
 
 ## Mandatory discipline once collaborating
-1. `board` open a topic with an explicit `--goal`.
-2. `spawn` run subagents, each with a concrete, NON-overlapping task.
-3. Subagent findings land on the board; converge with `board read`.
-4. `board close` the topic when done; distill valuable conclusions into knowledge.
-5. Before any complex investigation, check the knowledge index first — MUST NOT re-explore what is already concluded.
+1. `board open` a topic with an explicit `--goal`.
+2. `spawn run` subagents, each with a concrete, NON-overlapping task.
+3. After spawn completes, `board read` ALL findings.
+4. **Convergence check**: Does the board now answer the goal? Any gaps, conflicts, or unexplored angles?
+   - **Not converged**: Spawn another round targeting the gaps. Never repeat previous exploration.
+   - **Converged**: Proceed to close.
+5. `board close` the topic; distill valuable conclusions into knowledge.
+6. Before any investigation, check the knowledge index — MUST NOT re-explore what is already concluded.
