@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync, re
 import { join } from "node:path";
 import { getStorageRoot, ensureDir } from "../storage/index.ts";
 import { appendEvent } from "../events/index.ts";
-import { Topic, Note, TopicMeta } from "./types.ts";
+import type { Topic, Note, TopicMeta } from "./types.ts";
 
 function topicsDir(): string { return join(getStorageRoot(), "topics"); }
 function topicJsonlPath(topicId: string): string { return join(topicsDir(), `${topicId}.jsonl`); }

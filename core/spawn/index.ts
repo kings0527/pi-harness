@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { appendEvent } from "../events/index.ts";
 import { listTopics } from "../board/index.ts";
-import { AgentProfile, renderSystemPrompt } from "../identity/index.ts";
+import { renderSystemPrompt } from "../identity/index.ts";
+import type { AgentProfile } from "../identity/index.ts";
 
 export interface SpawnOptions {
   profile: AgentProfile;

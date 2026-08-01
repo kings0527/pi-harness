@@ -3,14 +3,14 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "outDir": "dist",
     "rootDir": ".",
-    "declaration": true,
     "resolveJsonModule": true
   },
-  "include": ["core/**/*.ts", "extensions/**/*.ts"],
+  "include": ["core/**/*.ts", "extensions/**/*.ts", "tests/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

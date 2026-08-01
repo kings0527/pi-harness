@@ -1,5 +1,5 @@
 import { readNotes } from "./index.ts";
-import { Note } from "./types.ts";
+import type { Note } from "./types.ts";
 
 interface DigestCache {
   lastSeq: number;
