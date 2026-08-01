@@ -1,0 +1,5 @@
+{
+  "name": "worker",
+  "specialty": ["implementation", "experimentation", "detailed analysis"],
+  "out_of_scope": ["changing investigation direction without board consensus"]
+}
