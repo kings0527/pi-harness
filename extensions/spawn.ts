@@ -1,7 +1,8 @@
 import { Type } from "typebox";
 // 注意：extension 中引用 core/ 时使用相对路径
 import { listProfiles, loadProfile } from "../core/identity/index.ts";
-import { spawnAgents, SpawnOptions } from "../core/spawn/index.ts";
+import { spawnAgents } from "../core/spawn/index.ts";
+import type { SpawnOptions } from "../core/spawn/index.ts";
 import { listTopics } from "../core/board/index.ts";
 
 export default async function(pi: any) {
