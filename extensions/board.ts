@@ -6,7 +6,7 @@ export default async function(pi: any) {
   pi.registerTool({
     name: "board",
     label: "Shared Blackboard",
-    description: "Topic-based shared blackboard for multi-agent collaboration. Actions: open <topic> --goal, post <topic> <content>, read <topic> [--since seq], list, close <topic>.",
+    description: "Topic-based shared blackboard for multi-agent collaboration. Actions: open <topic> --goal, post <topic> <content>, read <topic> [--since seq], list, close <topic>. Use proactively when investigating multi-angle problems — no user instruction needed.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("open"),
