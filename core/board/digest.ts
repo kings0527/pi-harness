@@ -44,11 +44,20 @@ export function generateDigest(topicId: string, opts: DigestOptions = {}): Diges
   }
 
   // Generate digest with budget
+  // 0. Latest plan note: 无条件置顶（取 seq 最大的一条）
+  const planNotes = notes.filter(n => n.tags?.includes("plan"));
+  const latestPlan = planNotes.length > 0 ? planNotes[planNotes.length - 1] : null;
+
   // 1. Human critical notes: 无条件置顶，不受预算限制
   const critical = notes.filter(n => n.priority === "critical");
-  const nonCritical = notes.filter(n => n.priority !== "critical");
+  const nonCritical = notes.filter(n => n.priority !== "critical" && n !== latestPlan);
 
   let digest = "";
+
+  // Plan note first (unbudgeted, latest version only)
+  if (latestPlan) {
+    digest += `[PLAN] ${latestPlan.author}: ${latestPlan.content}\n`;
+  }
 
   // Critical notes always included (unbudgeted)
   if (critical.length > 0) {

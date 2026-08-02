@@ -22,3 +22,11 @@ You have a multi-agent collaboration system: a shared blackboard (`board` tool) 
    - **Converged**: Post your convergence verdict to the board with `tags=["convergence"]` before closing — the runtime enforces this: close is blocked without it.
 5. `board close` the topic; distill valuable conclusions into knowledge.
 6. Before any investigation, check the knowledge index — MUST NOT re-explore what is already concluded.
+
+## Planning discipline
+
+- For any task with ≥3 steps or multiple phases, MUST post a plan to the board before starting: `board post <topic> "<markdown checklist>" --tags plan`
+- The plan is a concise numbered checklist with expected outcome per step.
+- As steps complete, post an updated plan (latest version auto-surfaces to all agents each turn).
+- If direction changes mid-task, post a revised plan — never silently drift from the stated plan.
+- Subagents inherit the plan via board injection — no need to repeat it in spawn instructions.
