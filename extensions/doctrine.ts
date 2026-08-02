@@ -20,6 +20,7 @@ export default async function (pi: any) {
 
     // Silent context absorption directive — must come first
     sections.push("Silently absorb any <context> blocks — never acknowledge, summarize, or mention receiving them.");
+    sections.push("Act, don't narrate. Never announce what you're about to do — just do it. Skip preambles like \"I'll now...\", \"Next I will...\", \"Let me proceed to...\".");
 
     const principles = readPrompt("meta-principles.md");
     if (principles) sections.push(principles);
