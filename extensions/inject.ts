@@ -101,7 +101,7 @@ export default async function (pi: any) {
       if (event.messages && Array.isArray(event.messages)) {
         event.messages.push({
           role: "user",
-          content: [{ type: "text", text: `[pi-harness context]\n${injectedContent}` }],
+          content: [{ type: "text", text: `<context silent="true">\n${injectedContent}\n</context>` }],
         });
       }
     }

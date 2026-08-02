@@ -18,6 +18,9 @@ export default async function (pi: any) {
   pi.on("before_agent_start", async (event: any, _ctx: any) => {
     const sections: string[] = [];
 
+    // Silent context absorption directive — must come first
+    sections.push("Silently absorb any <context> blocks — never acknowledge, summarize, or mention receiving them.");
+
     const principles = readPrompt("meta-principles.md");
     if (principles) sections.push(principles);
 
