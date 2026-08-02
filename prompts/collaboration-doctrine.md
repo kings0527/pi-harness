@@ -20,7 +20,7 @@ You have a multi-agent collaboration system: a shared blackboard (`board` tool) 
 4. **Convergence check**: Does the board now answer the goal? Any gaps, conflicts, or unexplored angles?
    - **Not converged**: Spawn another round targeting the gaps. Never repeat previous exploration.
    - **Converged**: Post your convergence verdict to the board with `tags=["convergence"]` before closing — the runtime enforces this: close is blocked without it.
-5. `board close` the topic; distill valuable conclusions into knowledge.
+5. `board close` the topic — then immediately distill: review archived findings and elevate reusable conclusions to `knowledge/`. This is part of closing, not a separate optional step.
 6. Before any investigation, check the knowledge index — MUST NOT re-explore what is already concluded.
 
 ## Planning discipline
