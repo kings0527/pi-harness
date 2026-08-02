@@ -52,7 +52,8 @@ export default async function (pi: any) {
   // Context injection hook — fires before every LLM call
   pi.on("context", async (event: any, _ctx: any) => {
     const injections: string[] = [];
-    let totalBudget = 3000; // bytes
+    const WRAPPER_OVERHEAD = 40; // <context silent="true">\n...\n</context> ≈ 40 bytes
+    let totalBudget = 3000 - WRAPPER_OVERHEAD;
 
     // 1. Knowledge index (always inject if non-empty)
     const knowledgeIndex = getKnowledgeIndex();
