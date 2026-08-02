@@ -69,7 +69,7 @@ export default async function(pi: any) {
           case "close": {
             if (!params.topic) throw new Error("topic is required for close");
             const result = closeTopic(params.topic);
-            return { content: [{ type: "text" as const, text: `Closed topic "${params.topic}". Summary and decisions generated in archive.` }] };
+            return { content: [{ type: "text" as const, text: `Closed topic "${params.topic}". Summary and decisions saved to archive.\n\nNow run distill: review the archived findings and elevate valuable conclusions to long-term knowledge (board action=distill, or read the archive and use the distill skill).` }] };
           }
           case "distill": {
             if (!params.path) throw new Error("path is required for distill");
