@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { getStorageRoot, ensureDir } from "../storage/index.ts";
 import { appendEvent } from "../events/index.ts";
@@ -7,6 +7,25 @@ import type { Topic, Note, TopicMeta } from "./types.ts";
 function topicsDir(): string { return join(getStorageRoot(), "topics"); }
 function topicJsonlPath(topicId: string): string { return join(topicsDir(), `${topicId}.jsonl`); }
 function topicBoardMdPath(topicId: string): string { return join(topicsDir(), `${topicId}.board.md`); }
+
+// Simple file-based lock for single-machine concurrency
+function acquireLock(topicId: string, timeoutMs = 5000): boolean {
+  const lockPath = topicJsonlPath(topicId) + ".lock";
+  const start = Date.now();
+  while (existsSync(lockPath)) {
+    if (Date.now() - start > timeoutMs) return false;
+    // busy wait (simple approach, sufficient for single machine)
+    const end = Date.now() + 50;
+    while (Date.now() < end) {} // 50ms spin
+  }
+  writeFileSync(lockPath, String(process.pid), "utf-8");
+  return true;
+}
+
+function releaseLock(topicId: string): void {
+  const lockPath = topicJsonlPath(topicId) + ".lock";
+  if (existsSync(lockPath)) unlinkSync(lockPath);
+}
 
 export function openTopic(topicId: string, goal: string): Topic {
   const jsonlPath = topicJsonlPath(topicId);
@@ -25,28 +44,35 @@ export function postNote(topicId: string, author: string, content: string, opts?
   const jsonlPath = topicJsonlPath(topicId);
   if (!existsSync(jsonlPath)) throw new Error(`Topic "${topicId}" not found`);
 
-  // Read existing notes to get next seq
-  const notes = readNotes(topicId);
-  const seq = notes.length > 0 ? notes[notes.length - 1].seq + 1 : 1;
+  if (!acquireLock(topicId)) {
+    throw new Error(`Failed to acquire lock for topic "${topicId}" (timeout)`);
+  }
+  try {
+    // Read existing notes to get next seq
+    const notes = readNotes(topicId);
+    const seq = notes.length > 0 ? notes[notes.length - 1].seq + 1 : 1;
 
-  const note: Note = {
-    seq,
-    author,
-    timestamp: Date.now(),
-    content,
-    ...(opts?.tags && { tags: opts.tags }),
-    ...(opts?.priority && { priority: opts.priority }),
-  };
+    const note: Note = {
+      seq,
+      author,
+      timestamp: Date.now(),
+      content,
+      ...(opts?.tags && { tags: opts.tags }),
+      ...(opts?.priority && { priority: opts.priority }),
+    };
 
-  appendFileSync(jsonlPath, JSON.stringify(note) + "\n", "utf-8");
+    appendFileSync(jsonlPath, JSON.stringify(note) + "\n", "utf-8");
 
-  // Re-render board.md
-  const topic = getTopicMeta(topicId);
-  const allNotes = readNotes(topicId);
-  renderBoardMd(topicId, topic, allNotes);
+    // Re-render board.md
+    const topic = getTopicMeta(topicId);
+    const allNotes = readNotes(topicId);
+    renderBoardMd(topicId, topic, allNotes);
 
-  appendEvent("board_post", { topic: topicId, seq, author });
-  return note;
+    appendEvent("board_post", { topic: topicId, seq, author });
+    return note;
+  } finally {
+    releaseLock(topicId);
+  }
 }
 
 export function readNotes(topicId: string, since?: number): Note[] {
@@ -160,7 +186,11 @@ function renderBoardMd(topicId: string, topic: Topic, notes: Note[]): void {
     md += `${note.content}\n\n`;
   }
 
-  writeFileSync(topicBoardMdPath(topicId), md, "utf-8");
+  // Atomic write: tmp + rename
+  const boardMdPath = topicBoardMdPath(topicId);
+  const tmpPath = boardMdPath + ".tmp";
+  writeFileSync(tmpPath, md, "utf-8");
+  renameSync(tmpPath, boardMdPath);
 }
 
 function generateSummary(topic: Topic, notes: Note[]): string {

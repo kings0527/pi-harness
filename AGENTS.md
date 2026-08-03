@@ -6,7 +6,7 @@
 - `extensions/` — Thin adapter layer. ONLY place that touches pi Extension API (`pi.on()`, `pi.registerTool()`).
 - `skills/` — Markdown workflow guides (SKILL.md with YAML frontmatter). Loaded by pi on demand.
 - `prompts/` — Constant prompt templates injected into systemPrompt via `extensions/doctrine.ts`.
-- `knowledge/` — Long-term memory store (git-versioned markdown + index.md).
+- `knowledge/` — Long-term memory store (global: `~/.pi-harness/knowledge/`, not in repo). Auto-created at runtime.
 - `agents/` — Role cards (JSON) for spawn subagents.
 
 ## Core Invariants

@@ -18,14 +18,15 @@ pi install github:kings0527/pi-harness         # 从 GitHub
 ### 协作层：Board + Spawn
 
 - **`board` 工具**：topic-based 共享黑板。核心协作动作 `open`（定目标）/ `post`（上板）/ `read`（读板，支持增量 `--since`）/ `list` / `close`（归档并生成 summary + decisions）。
-- **`spawn` 工具**：并行启动分工 subagent。三张角色卡——`scout`（探索）/ `worker`（深挖）/ `reviewer`（验证/找反例）。subagent 以 `pi --print` 脚本化驱动，非交互、并行、带超时，产出全部落板。
+- **`spawn` 工具**：并行启动分工 subagent。五张角色卡——`scout`（探索）/ `worker`（深挖）/ `reviewer`（验证/找反例）/ `advocate`（辩论正方）/ `critic`（辩论反方）。subagent 以 `pi --print` 脚本化驱动，非交互、并行、带超时，产出全部落板。
+- **`/storm` 命令**：开启多模型对抗辩论。`/storm on <model1>,<model2>` 启用后，agent 可通过 `spawn action=debate` 触发回合制辩论（advocate 先上板，critic 读板后反驳）。适用于判断题、盲区突破等场景。
 - **Agent 自主判断**何时启动多 agent 协作（≥2 个可并行方向、探索面大、需独立验证时），无需用户手动指示。
 - **迭代收敛循环**：spawn → 读板 → 不够就针对缺口再 spawn → 收敛才 close。
 - **Close 门禁**：runtime 强制 `close` 前必须先在板上贴出带 `convergence` tag 的收敛判词，否则阻断（收敛判断归 LLM，存在性校验归代码）。
 
 ### 知识层：Knowledge + Distill
 
-- **`knowledge/`**：markdown 目录树 + `index.md` 索引，作为长期记忆，随 git 版本化。
+- **`knowledge/`**：全局知识库（`~/.pi-harness/knowledge/`），markdown 目录树 + `index.md` 索引，跨项目复用的认知资产，运行时自动创建。
 - **`distill` skill**：topic close 后系统性评估每条发现，够格的蒸馏进知识库。写入走 `board` 工具的 `distill` 动作。
 - **强制溯源**：每条知识条目必须带 `source`（如 `topic-<id>#seq-<N>`），无溯源直接被 runtime 拒绝。
 - **CONFLICT 标记机制**：新知识与旧条目冲突时用 `distill-conflict` 只追加冲突块，永不静默覆盖原内容。
@@ -62,6 +63,7 @@ pi install github:kings0527/pi-harness         # 从 GitHub
 extensions/          ← pi 薄适配层（工具注册 + hooks，唯一接触 pi 接口的层）
   board.ts           共享黑板工具
   spawn.ts           多 agent spawn 工具
+  storm.ts           /storm 命令注册
   context-feed.ts    context feed（knowledge index + board digest/plan）
   discipline.ts      纪律 hooks（read-before-write, fail-loud, diff-scope）
   convergence.ts     收敛门禁（close 前置校验 + spawn 轮次护栏）
@@ -71,12 +73,14 @@ core/                ← 纯 Node.js，runtime 无关（零 pi import）
   knowledge/         知识库读写
   identity/          角色卡加载
   spawn/             subagent 启动
+  storm/             storm 配置管理
   events/            事件日志
   storage/           存储路径管理
 skills/distill/      ← 蒸馏工作流 skill
+skills/storm/        ← Storm 辩论 skill（按需加载）
 prompts/             ← 常驻 prompt（meta-principles + collaboration-doctrine）
-knowledge/           ← 长期知识存储（git 版本化）
-agents/              ← 角色卡（scout / worker / reviewer）
+knowledge/           ← 全局知识存储（~/.pi-harness/knowledge/，不在仓库内，运行时自动创建）
+agents/              ← 角色卡（scout / worker / reviewer / advocate / critic）
 docs/decisions/      ← 架构决策记录（ADR）
 ```
 
@@ -99,6 +103,7 @@ docs/decisions/      ← 架构决策记录（ADR）
 - **0004**: Spawn 用 `pi --print` 脚本化驱动
 - **0005**: 协作准则常驻 systemPrompt 注入
 - **0006**: Close 收敛门禁
+- **0007**: Storm 辩论回合制
 
 ## 开发
 

@@ -38,7 +38,7 @@ export function listProfiles(): AgentProfile[] {
 const DEBATE_DISCIPLINE = `
 DEBATE DISCIPLINE (strict):
 1. EVIDENCE-BASED: Every claim MUST cite specific evidence (code, docs, data, logic). Unsupported assertions are invalid.
-2. DIALECTICAL: After posting your position, read the board for opposing views. Your next post MUST directly address their specific arguments — not just restate yours.
+2. RESPOND TO EVIDENCE: Read the board before posting. If other participants have already posted, your response MUST directly address their specific arguments.
 3. NO DRIFT: Do not be persuaded by rhetoric or authority. Only change your position if presented with evidence that logically disproves your current stance. State explicitly what changed your mind.
 4. REFLECT: Before your final post, explicitly state: "What is the strongest point my opponent made that I cannot refute?" If nothing — explain why.
 5. STEEL-MAN: Before attacking an opposing view, restate it in its strongest possible form. Attack the strong version, not a straw man.
