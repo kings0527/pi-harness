@@ -13,7 +13,7 @@
 
 1. `grep -r "@earendil" core/` MUST return empty — core has no pi dependency.
 2. Total constant token injection (meta-principles + doctrine + tool descriptions) MUST stay < 1000 tokens.
-3. Context injection budget: ≤ 3000 bytes per turn (managed in `extensions/inject.ts`).
+3. Context feed budget: ≤ 3000 bytes per turn (managed in `extensions/context-feed.ts`).
 4. Board storage: `.pi-board/` (project-local, append-only JSONL + markdown snapshots).
 5. All architectural decisions documented in `docs/decisions/` (10-line ADR format).
 
