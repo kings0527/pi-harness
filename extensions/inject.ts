@@ -120,16 +120,27 @@ export default async function (pi: any) {
       }
     }
 
-    // 3. Inject as context message if we have content
-    if (injections.length > 0) {
+    // 3. Inject context by appending to the last user message (not a separate message)
+    // A separate role:"user" message triggers LLM response patterns — appending avoids this.
+    if (injections.length > 0 && event.messages && Array.isArray(event.messages)) {
       const injectedContent = injections.join("\n\n---\n\n");
+      const contextBlock = `\n\n<context silent="true">\n${injectedContent}\n</context>`;
 
-      // Modify the messages array to include our injection
-      if (event.messages && Array.isArray(event.messages)) {
-        event.messages.push({
-          role: "user",
-          content: [{ type: "text", text: `<context silent="true">\n${injectedContent}\n</context>` }],
-        });
+      // Find the last user message and append to its content
+      for (let i = event.messages.length - 1; i >= 0; i--) {
+        const msg = event.messages[i];
+        if (msg.role === "user" && Array.isArray(msg.content)) {
+          const lastTextPart = msg.content.findLast((p: any) => p.type === "text");
+          if (lastTextPart) {
+            lastTextPart.text += contextBlock;
+          } else {
+            msg.content.push({ type: "text", text: contextBlock });
+          }
+          break;
+        } else if (msg.role === "user" && typeof msg.content === "string") {
+          msg.content += contextBlock;
+          break;
+        }
       }
     }
 
