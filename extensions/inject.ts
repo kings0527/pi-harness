@@ -81,7 +81,7 @@ export default async function (pi: any) {
     // 1. Knowledge index (always inject if non-empty)
     const knowledgeIndex = getKnowledgeIndex();
     if (knowledgeIndex) {
-      const knowledgeSection = `[Knowledge Index]\n${knowledgeIndex}`;
+      const knowledgeSection = knowledgeIndex;
       const kBytes = Buffer.byteLength(knowledgeSection, "utf-8");
       if (kBytes < 500) { // Knowledge index should be small
         injections.push(knowledgeSection);
@@ -109,7 +109,7 @@ export default async function (pi: any) {
           });
 
           if (digest.text) {
-            const section = `[Board: ${topic.id}]\nGoal: ${topic.goal}\n${digest.text}`;
+            const section = `${topic.id} (${topic.goal}):\n${digest.text}`;
             injections.push(section);
             totalBudget -= Buffer.byteLength(section, "utf-8");
             lastInjectedSeq.set(topic.id, digest.lastSeq);
