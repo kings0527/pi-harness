@@ -62,7 +62,7 @@ pi install github:kings0527/pi-harness         # 从 GitHub
 extensions/          ← pi 薄适配层（工具注册 + hooks，唯一接触 pi 接口的层）
   board.ts           共享黑板工具
   spawn.ts           多 agent spawn 工具
-  inject.ts          context 注入（knowledge index + board digest/plan）
+  context-feed.ts    context feed（knowledge index + board digest/plan）
   discipline.ts      纪律 hooks（read-before-write, fail-loud, diff-scope）
   convergence.ts     收敛门禁（close 前置校验 + spawn 轮次护栏）
   doctrine.ts        常驻认知注入（before_agent_start）

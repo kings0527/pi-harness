@@ -5,7 +5,7 @@ import { join } from "node:path";
 // pi 0.83 语义：before_agent_start 返回 { systemPrompt } 即替换本轮 system prompt，
 // 多个 extension 返回时链式叠加（见 BeforeAgentStartEventResult 定义）。
 
-// 注意：extension 中引用包内文件时以包根为基准（参考 inject.ts 的路径解析方式）
+// 注意：extension 中引用包内文件时以包根为基准（参考 context-feed.ts 的路径解析方式）
 const packageRoot = join(import.meta.dirname || process.cwd(), "..");
 
 function readPrompt(name: string): string {
