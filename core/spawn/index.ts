@@ -10,6 +10,7 @@ export interface SpawnOptions {
   task: string; // 分派给该 subagent 的具体调查任务
   cwd?: string;
   timeoutMs?: number; // 默认 10 分钟
+  model?: string; // 指定模型（如 "deepseek-r1"），传递 --model 给 pi
 }
 
 export interface SpawnResult {
@@ -40,7 +41,12 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   return new Promise<SpawnResult>((resolve) => {
     // --print: 非交互脚本化驱动; --approve: 信任项目本地扩展（同一份 pi-harness + .pi-board/）
-    const child = spawn(piBin, ["--print", "--approve", prompt], {
+    const args = ["--print", "--approve"];
+    if (opts.model) {
+      args.push("--model", opts.model);
+    }
+    args.push(prompt);
+    const child = spawn(piBin, args, {
       cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
