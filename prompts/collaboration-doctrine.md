@@ -14,8 +14,8 @@ You have a multi-agent collaboration system: a shared blackboard (`board` tool) 
 - The user is just asking a question or chatting.
 
 ## Mandatory discipline once collaborating
-1. `board open` a topic with an explicit `--goal`.
-2. `spawn run` subagents, each with a concrete, NON-overlapping task.
+1. `board` action=open, topic="<short-slug>", goal="<what we're investigating>" — topic is REQUIRED, use a kebab-case slug like `perf-analysis` or `api-design`.
+2. `spawn` action=run, topic="<same-topic>", agents=[{profile:"scout", task:"..."}] — each with a concrete, NON-overlapping task.
 3. After spawn completes, `board read` ALL findings.
 4. **Convergence check**: Does the board now answer the goal? Any gaps, conflicts, or unexplored angles?
    - **Not converged**: Spawn another round targeting the gaps. Never repeat previous exploration.
