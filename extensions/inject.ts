@@ -124,7 +124,7 @@ export default async function (pi: any) {
     // A separate role:"user" message triggers LLM response patterns — appending avoids this.
     if (injections.length > 0 && event.messages && Array.isArray(event.messages)) {
       const injectedContent = injections.join("\n\n---\n\n");
-      const contextBlock = `\n\n<context silent="true">\n${injectedContent}\n</context>`;
+      const contextBlock = `\n\n<!-- pi-harness-ref -->\n${injectedContent}\n<!-- /pi-harness-ref -->`;
 
       // Find the last user message and append to its content
       for (let i = event.messages.length - 1; i >= 0; i--) {
