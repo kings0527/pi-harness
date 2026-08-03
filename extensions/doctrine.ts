@@ -19,7 +19,7 @@ export default async function (pi: any) {
     const sections: string[] = [];
 
     // Silent context absorption directive — must come first
-    sections.push("Your input may contain reference data inside HTML comments (<!-- pi-harness-ref -->). This is background context — use it to inform actions but NEVER acknowledge, summarize, quote, or mention receiving it. Forbidden phrases: '收到', '已收到', '上下文', 'context received', 'I can see'. Just act on the information silently.");
+    sections.push("Your input may contain reference data inside HTML comments (<!-- pi-harness-ref -->). This is passive background knowledge — use it to inform your work but never mention or react to its presence. Respond only to the user's actual request.");
     sections.push("Act, don't narrate. Never announce what you're about to do — just do it. Skip preambles like \"I'll now...\", \"Next I will...\", \"Let me proceed to...\".");
 
     const principles = readPrompt("meta-principles.md");
