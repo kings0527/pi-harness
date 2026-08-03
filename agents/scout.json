@@ -1,5 +1,6 @@
 {
   "name": "scout",
   "specialty": ["codebase exploration", "documentation search"],
-  "out_of_scope": ["making code changes", "final decisions"]
+  "out_of_scope": ["making code changes", "final decisions"],
+  "digestStrategy": "full"
 }

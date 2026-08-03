@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { generateDigest } from "../core/board/digest.ts";
+import type { DigestStrategy } from "../core/board/digest.ts";
 import { listTopics } from "../core/board/index.ts";
 import { getStorageRoot } from "../core/storage/index.ts";
 
@@ -13,6 +14,28 @@ const participatingTopics = new Set<string>();
 
 // Last injected seq per topic (to avoid duplicate injection)
 const lastInjectedSeq = new Map<string, number>();
+
+// Resolve the current agent's digestStrategy from its role card
+function resolveDigestStrategy(): DigestStrategy {
+  const packageRoot = join(import.meta.dirname || process.cwd(), "..");
+  const agentsDir = join(packageRoot, "agents");
+
+  if (!existsSync(agentsDir)) return "auto";
+
+  // Check PI_AGENT_NAME env or fall back to scanning
+  const agentName = process.env.PI_AGENT_NAME;
+  if (agentName) {
+    const cardPath = join(agentsDir, `${agentName}.json`);
+    if (existsSync(cardPath)) {
+      try {
+        const card = JSON.parse(readFileSync(cardPath, "utf-8"));
+        if (card.digestStrategy) return card.digestStrategy as DigestStrategy;
+      } catch { /* malformed card — fall through */ }
+    }
+  }
+
+  return "auto";
+}
 
 function getKnowledgeIndex(): string {
   // Check cache freshness
@@ -74,12 +97,15 @@ export default async function (pi: any) {
           t => t.status === "open" && participatingTopics.has(t.id)
         );
 
+        const digestStrategy = resolveDigestStrategy();
+
         for (const topic of openParticipating) {
           if (totalBudget <= 100) break; // Reserve minimum space
 
           const digest = generateDigest(topic.id, {
             lastSeq: 0, // Always generate full digest for injection
             maxBytes: Math.min(totalBudget, 1500), // Cap per-topic
+            strategy: digestStrategy,
           });
 
           if (digest.text) {
