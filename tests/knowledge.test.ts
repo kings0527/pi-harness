@@ -1,13 +1,12 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
-// knowledge 根锚定包根 knowledge/（core/knowledge 按 import.meta.dirname 解析），
-// 测试只在唯一的 __test__/ 子目录内写入，并快照恢复 index.md，after 中彻底清理。
-// appendEvent 依赖 process.cwd()/.pi-board，同样 chdir 到临时目录隔离。
-const knowledgeRoot = join(import.meta.dirname, "..", "knowledge");
+// knowledge root is now global: ~/.pi-harness/knowledge/
+// Tests write into a __test__/ subdirectory and restore index.md after.
+const knowledgeRoot = join(homedir(), ".pi-harness", "knowledge");
 const indexPath = join(knowledgeRoot, "index.md");
 const testSubdir = join(knowledgeRoot, "__test__");
 
@@ -18,6 +17,12 @@ let knowledge: typeof import("../core/knowledge/index.ts");
 before(async () => {
   workDir = mkdtempSync(join(tmpdir(), "pi-harness-knowledge-test-"));
   process.chdir(workDir);
+  // Ensure global knowledge dir exists
+  if (!existsSync(knowledgeRoot)) {
+    mkdirSync(knowledgeRoot, { recursive: true });
+  }
+  // Clean up leftover test artifacts from previous runs
+  rmSync(testSubdir, { recursive: true, force: true });
   indexSnapshot = existsSync(indexPath) ? readFileSync(indexPath, "utf-8") : null;
   knowledge = await import("../core/knowledge/index.ts");
 });

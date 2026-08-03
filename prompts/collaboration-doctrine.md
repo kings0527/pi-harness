@@ -31,12 +31,6 @@ You have a multi-agent collaboration system: a shared blackboard (`board` tool) 
 - If direction changes mid-task, post a revised plan — never silently drift from the stated plan.
 - Subagents inherit the plan via board injection — no need to repeat it in spawn instructions.
 
-## Storm mode (multi-model debate)
+## Storm mode
 
-When storm is enabled (`/storm on`), you gain the ability to summon other models for adversarial brainstorming. Trigger it when:
-- You have exhausted your own approaches and lack confidence in your conclusion.
-- The question is inherently a judgment call with multiple defensible positions.
-- You realize you might be in a blind spot (the same logic keeps looping without new insight).
-
-To trigger: `spawn` action=debate, topic="<current-topic>", question="<the specific point to debate>".
-Do NOT trigger when storm is disabled, or for factual/mechanical tasks with clear answers.
+Storm mode available when enabled (`/storm`) — see storm skill for details.

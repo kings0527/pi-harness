@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 // 注意：extension 中引用 core/ 时使用相对路径
 import { listProfiles, loadProfile } from "../core/identity/index.ts";
-import { spawnAgents } from "../core/spawn/index.ts";
+import { spawnAgent, spawnAgents } from "../core/spawn/index.ts";
 import type { SpawnOptions } from "../core/spawn/index.ts";
 import { listTopics } from "../core/board/index.ts";
 import { getStormConfig } from "../core/storm/index.ts";
@@ -10,7 +10,7 @@ export default async function(pi: any) {
   pi.registerTool({
     name: "spawn",
     label: "Spawn Subagents",
-    description: "Spawn role-carded subagents that investigate in parallel and post findings to the board. Actions: list (available profiles), run (agents: [{profile, task}], topic must be open), debate (topic, question — storm must be enabled, spawns advocate+critic with different models). Spawn parallel agents proactively when a task has independent investigation directions.",
+    description: "Spawn subagents to investigate and post findings to the board. Actions: list, run (parallel agents), debate (storm adversarial).",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("list"),
@@ -84,28 +84,32 @@ export default async function(pi: any) {
             const advocateProfile = loadProfile("advocate");
             const criticProfile = loadProfile("critic");
 
-            const debateOpts: SpawnOptions[] = [
-              {
-                profile: advocateProfile,
-                topic: params.topic,
-                task: `DEBATE POSITION: Defend the following with evidence and rigorous argument:\n"${params.question}"\nYou MUST find the strongest possible case FOR this position.`,
-                cwd: process.cwd(),
-                model: storm.models[0],
-                ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
-              },
-              {
-                profile: criticProfile,
-                topic: params.topic,
-                task: `DEBATE POSITION: Challenge and stress-test the following claim:\n"${params.question}"\nYou MUST find the strongest counterexamples and logical gaps AGAINST this position.`,
-                cwd: process.cwd(),
-                model: storm.models[1],
-                ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
-              },
-            ];
-
             onUpdate?.({ content: [{ type: "text" as const, text: `⚡ Storm debate: advocate (${storm.models[0]}) vs critic (${storm.models[1]}) on: "${params.question}"` }] });
 
-            const debateResults = await spawnAgents(debateOpts);
+            // Round-based: advocate first, then critic reads advocate's board post
+            const advocateOpts: SpawnOptions = {
+              profile: advocateProfile,
+              topic: params.topic,
+              task: `DEBATE POSITION: Defend the following with evidence and rigorous argument:\n"${params.question}"\nYou MUST find the strongest possible case FOR this position.`,
+              cwd: process.cwd(),
+              model: storm.models[0],
+              ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
+            };
+            const advocateResult = await spawnAgent(advocateOpts);
+
+            onUpdate?.({ content: [{ type: "text" as const, text: `Advocate finished (exit ${advocateResult.exitCode}). Spawning critic...` }] });
+
+            const criticOpts: SpawnOptions = {
+              profile: criticProfile,
+              topic: params.topic,
+              task: `DEBATE POSITION: Challenge and stress-test the following claim:\n"${params.question}"\nYou MUST find the strongest counterexamples and logical gaps AGAINST this position.\nREAD THE BOARD FIRST — the advocate has already posted their arguments. You MUST directly address their specific points.`,
+              cwd: process.cwd(),
+              model: storm.models[1],
+              ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
+            };
+            const criticResult = await spawnAgent(criticOpts);
+
+            const debateResults = [advocateResult, criticResult];
 
             const debateFormatted = debateResults.map(r => {
               const status = r.timedOut ? "TIMED OUT" : `exit ${r.exitCode}`;

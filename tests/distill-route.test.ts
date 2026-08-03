@@ -1,13 +1,12 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 // 验证 board 工具的 distill / distill-conflict action 真实路由到 core/knowledge。
-// 隔离方式同 knowledge.test.ts：chdir 临时目录（.pi-board），knowledge/ 限定
-// __test__/ 子目录并快照恢复 index.md。
-const knowledgeRoot = join(import.meta.dirname, "..", "knowledge");
+// knowledge root is now global: ~/.pi-harness/knowledge/
+const knowledgeRoot = join(homedir(), ".pi-harness", "knowledge");
 const indexPath = join(knowledgeRoot, "index.md");
 const testSubdir = join(knowledgeRoot, "__test__");
 
@@ -18,6 +17,12 @@ let boardTool: any;
 before(async () => {
   workDir = mkdtempSync(join(tmpdir(), "pi-harness-distill-test-"));
   process.chdir(workDir);
+  // Ensure global knowledge dir exists
+  if (!existsSync(knowledgeRoot)) {
+    mkdirSync(knowledgeRoot, { recursive: true });
+  }
+  // Clean up leftover test artifacts from previous runs
+  rmSync(testSubdir, { recursive: true, force: true });
   indexSnapshot = existsSync(indexPath) ? readFileSync(indexPath, "utf-8") : null;
 
   // 假 pi：只捕获 registerTool 注册的工具定义

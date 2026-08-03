@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { generateDigest } from "../core/board/digest.ts";
 import type { DigestStrategy } from "../core/board/digest.ts";
 import { listTopics } from "../core/board/index.ts";
@@ -43,9 +44,8 @@ function getKnowledgeIndex(): string {
     return knowledgeIndexCache.content;
   }
 
-  // Try to read knowledge/index.md from package root
-  const packageRoot = join(import.meta.dirname || process.cwd(), "..");
-  const indexPath = join(packageRoot, "knowledge", "index.md");
+  // Knowledge index is at global path: ~/.pi-harness/knowledge/index.md
+  const indexPath = join(homedir(), ".pi-harness", "knowledge", "index.md");
 
   if (!existsSync(indexPath)) {
     knowledgeIndexCache = { content: "", fetchedAt: Date.now() };
@@ -83,9 +83,11 @@ export default async function (pi: any) {
     if (knowledgeIndex) {
       const knowledgeSection = knowledgeIndex;
       const kBytes = Buffer.byteLength(knowledgeSection, "utf-8");
-      if (kBytes < 500) { // Knowledge index should be small
+      if (kBytes < 1000) {
         injections.push(knowledgeSection);
         totalBudget -= kBytes;
+      } else {
+        console.error("[pi-harness] knowledge index exceeds 1000B, skipping injection");
       }
     }
 

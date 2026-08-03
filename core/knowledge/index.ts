@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 import { appendEvent } from "../events/index.ts";
 
 export interface IndexEntry {
@@ -7,10 +8,10 @@ export interface IndexEntry {
   description: string;
 }
 
-// Knowledge root is relative to package root
+// Knowledge root is global: ~/.pi-harness/knowledge/
+// Knowledge is a cross-project cognitive asset, not project-local.
 function getKnowledgeRoot(): string {
-  // Package root: parent of core/
-  const root = join(import.meta.dirname || __dirname, "..", "..", "knowledge");
+  const root = join(homedir(), ".pi-harness", "knowledge");
   if (!existsSync(root)) {
     mkdirSync(root, { recursive: true });
   }
