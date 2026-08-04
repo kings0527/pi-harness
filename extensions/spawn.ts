@@ -81,41 +81,69 @@ export default async function(pi: any) {
             if (!debateMeta) throw new Error(`Topic "${params.topic}" not found — open it with the board tool first`);
             if (debateMeta.status !== "open") throw new Error(`Topic "${params.topic}" is ${debateMeta.status}, not open`);
 
-            const advocateProfile = loadProfile("advocate");
-            const criticProfile = loadProfile("critic");
+            const models = storm.models;
 
-            onUpdate?.({ content: [{ type: "text" as const, text: `⚡ Storm debate: advocate (${storm.models[0]}) vs critic (${storm.models[1]}) on: "${params.question}"` }] });
+            // 动态构建参与者列表
+            const participants: SpawnOptions[] = [];
 
-            // Round-based: advocate first, then critic reads advocate's board post
-            const advocateOpts: SpawnOptions = {
-              profile: advocateProfile,
-              topic: params.topic,
-              task: `DEBATE POSITION: Defend the following with evidence and rigorous argument:\n"${params.question}"\nYou MUST find the strongest possible case FOR this position.`,
-              cwd: process.cwd(),
-              model: storm.models[0],
-              ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
-            };
-            const advocateResult = await spawnAgent(advocateOpts);
+            if (models.length === 2) {
+              // 经典对抗：advocate vs critic
+              const advocateProfile = loadProfile("advocate");
+              const criticProfile = loadProfile("critic");
+              participants.push({
+                profile: advocateProfile,
+                topic: params.topic,
+                task: `DEBATE POSITION: Defend the following with evidence and rigorous argument:\n"${params.question}"\nYou MUST find the strongest possible case FOR this position.`,
+                cwd: process.cwd(),
+                model: models[0],
+                ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
+              });
+              participants.push({
+                profile: criticProfile,
+                topic: params.topic,
+                task: `DEBATE POSITION: Challenge and stress-test the following claim:\n"${params.question}"\nYou MUST find the strongest counterexamples and logical gaps AGAINST this position.\nREAD THE BOARD FIRST — the advocate has already posted their arguments. You MUST directly address their specific points.`,
+                cwd: process.cwd(),
+                model: models[1],
+                ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
+              });
+            } else {
+              // N 个独立分析者：每个用自己的模型独立分析
+              for (let i = 0; i < models.length; i++) {
+                participants.push({
+                  profile: {
+                    name: `analyst-${i + 1}`,
+                    specialty: ["independent analysis", "evidence-based reasoning"],
+                    confidence_bias: "form your own conclusion independently before reading others",
+                    out_of_scope: ["agreeing without evidence", "repeating others without adding new insight"],
+                    interactionMode: "debate" as const,
+                  },
+                  topic: params.topic,
+                  task: `INDEPENDENT ANALYSIS: Analyze the following question from your own perspective with evidence and rigorous reasoning:\n"${params.question}"\nREAD THE BOARD FIRST — if others have already posted, you MUST address their points: agree with evidence or refute with counter-evidence. Add NEW insight, do not merely repeat.`,
+                  cwd: process.cwd(),
+                  model: models[i],
+                  ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
+                });
+              }
+            }
 
-            onUpdate?.({ content: [{ type: "text" as const, text: `Advocate finished (exit ${advocateResult.exitCode}). Spawning critic...` }] });
+            const participantSummary = participants.map((p, i) => `${p.profile.name} (${models[i]})`).join(", ");
+            onUpdate?.({ content: [{ type: "text" as const, text: `⚡ Storm debate: ${participants.length} participants [${participantSummary}] on: "${params.question}"` }] });
 
-            const criticOpts: SpawnOptions = {
-              profile: criticProfile,
-              topic: params.topic,
-              task: `DEBATE POSITION: Challenge and stress-test the following claim:\n"${params.question}"\nYou MUST find the strongest counterexamples and logical gaps AGAINST this position.\nREAD THE BOARD FIRST — the advocate has already posted their arguments. You MUST directly address their specific points.`,
-              cwd: process.cwd(),
-              model: storm.models[1],
-              ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
-            };
-            const criticResult = await spawnAgent(criticOpts);
+            // 串行执行（回合制）——每个都能读到前面的论点
+            const debateResults = [];
+            for (let i = 0; i < participants.length; i++) {
+              const result = await spawnAgent(participants[i]);
+              debateResults.push(result);
+              if (i < participants.length - 1) {
+                onUpdate?.({ content: [{ type: "text" as const, text: `${result.name} finished (exit ${result.exitCode}). Spawning ${participants[i + 1].profile.name}...` }] });
+              }
+            }
 
-            const debateResults = [advocateResult, criticResult];
-
-            const debateFormatted = debateResults.map(r => {
+            const debateFormatted = debateResults.map((r, i) => {
               const status = r.timedOut ? "TIMED OUT" : `exit ${r.exitCode}`;
-              return `## ${r.name} [${status}]\n${r.output || "(no output)"}`;
+              return `## ${r.name} [${models[i]}] (${status})\n${r.output || "(no output)"}`;
             }).join("\n\n");
-            return { content: [{ type: "text" as const, text: `${debateFormatted}\n\n---\n⚡ Debate round complete. Now \`board read ${params.topic}\` to synthesize both positions. Consider: where do they agree? Where is the evidence strongest? What remains unresolved?` }] };
+            return { content: [{ type: "text" as const, text: `${debateFormatted}\n\n---\n⚡ Debate round complete (${debateResults.length} participants). Now \`board read ${params.topic}\` to synthesize all positions. Consider: where do they agree? Where is the evidence strongest? What remains unresolved?` }] };
           }
           default:
             throw new Error(`Unknown action: ${params.action}`);
