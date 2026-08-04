@@ -58,6 +58,20 @@ function getKnowledgeIndex(): string {
 }
 
 export default async function (pi: any) {
+  // Auto-restore: on new session, scan .pi-board/topics/ for all open topics
+  pi.on("session_start", async (_event: any, _ctx: any) => {
+    try {
+      const topics = listTopics();
+      for (const t of topics) {
+        if (t.status === "open") {
+          participatingTopics.add(t.id);
+        }
+      }
+    } catch {
+      // .pi-board not yet created — normal, skip
+    }
+  });
+
   // Track participation: when agent posts to a topic, record it
   pi.on("tool_result", async (event: any, _ctx: any) => {
     const toolName = event.tool || event.toolName;
