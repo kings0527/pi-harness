@@ -97,12 +97,10 @@ export default async function (pi: any) {
     if (knowledgeIndex) {
       const knowledgeSection = knowledgeIndex;
       const kBytes = Buffer.byteLength(knowledgeSection, "utf-8");
-      if (kBytes < 1000) {
-        injections.push(knowledgeSection);
-        totalBudget -= kBytes;
-      } else {
-        console.error("[pi-harness] knowledge index exceeds 1000B, skipping injection");
-      }
+      // Knowledge index is always injected — it's the agent's long-term memory directory.
+      // Even at 5KB (~1250 tokens) it's negligible vs any modern context window.
+      injections.push(knowledgeSection);
+      totalBudget -= kBytes;
     }
 
     // 2. Board digests for participating topics
