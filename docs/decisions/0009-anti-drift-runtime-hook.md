@@ -1,31 +1,40 @@
-# ADR-0009: Anti-drift 从常驻 SOP 改为 runtime hook + 极简 prompt
+# ADR-0009: Anti-drift as prompt judgment + minimal warning hook
 
 ## 背景
-`skills/anti-drift-discipline/SKILL.md` 当前是 233 词长 SOP，模型每轮按"四行假设/五字段锚点/六条纪律"机械输出。引用 2026-08-07 knowledge `findbug-metaskill-anti-premature-convergence`：半天内 6 条自信根因 3 条被证伪，证实当前 SOP 不仅冗余还助长"说服文"伪收敛。OpenAI/DeepSeek/Anthropic 官方一致结论：精简提示+让模型自验，长 SOP 对前沿模型反成负优化。
+初版（v1，commit 8aa84b1）把 anti-drift 改造成 runtime hook + 4 原则常驻 prompt，思路正确但 hook 内部引入了自动 STRICT 模式升级（NEUTRAL 计数到 3 则升级）和 context 状态注入。实战经验显示：① IDA 方法拆解这类任务需百万 token，期间"3 次 NEUTRAL"判定为停滞会打断合法的长程分析；② 探索者宁可"猴子排序"也不愿被禁止探索；③ 任何"门禁"假设 hook 知道何时该停——这正是 GPT/DeepSeek/Anthropic 官方指南都反对的模式。OpenAI 内部评测显示精简提示 + 让模型自验优于长 SOP，而**长 SOP 的"判断型"组件**（状态机、阈值）即使在 hook 里也会形成相同的负优化。
 
 ## 决策
-- 新增 `prompts/anti-drift.md`（~120 token，4 条原则）由 `doctrine.ts` 常驻注入
-- 重写 `SKILL.md` 为触发型（描述触发 + 完整原则参考，**不进** systemPrompt）
-- 新增 `core/anti-drift/{state,fingerprint,evidence,detector,types,events}.ts`
-- 新增 `extensions/anti-drift.ts`：onBeforeTurn/onToolCall/onToolResult/onAfterTurn/onContext
+**v2（当前）**：hook 只做一件事——检测"完全重复上一步的工具调用"并 warn 到 stderr + events.jsonl。warn 不会进 model context。
+- 常驻 4 原则 prompt（~215 token，judgment 给 LLM）
+- 触发型 SKILL.md（描述匹配加载，judgment 参考）
+- runtime hook：**只 emit warning**，不做任何 mode/计数/注入/门禁
+- 唯一的"硬约束"是 `PI_ANTIDRIFT_DISABLED=1` 关闭全部副作用（operator-only）
 
 ## 理由
-- prompt 是模型共享税，hook 是跨模型确定性执行。判断放 LLM，约束放代码。
-- 4 条原则对 DeepSeek V4 Flash / GPT-5.6 Sol / Opus 5 均不冗余（删掉了"70% 交付""每步四行""重复验证"等模型特异指令）
-- fingerprint 归一化不靠内容哈希（脆弱），靠 `{tool, targetPath, queryIntent, keyParams}`（语义等价）
-- evidence_delta 不信模型自评，靠返回内容启发式分类 + onAfterTurn 假设状态对账
+- **LLM 比 hook 更懂什么时候该停**。门禁（NEUTRAL 计数、步数、token）假设 hook 知道目标——但目标是 LLM 的。
+- **"猴子排序"是合法探索**。等价检测只针对"和上一步完全相同"（last-1 检查），不针对任何历史模式——A,B,A 这种有意振荡不报警。
+- **warn 不进 context**：model 不需要被自己已经知道的事打扰；operator 需要从 stderr 看到异常。
+- **完全去门禁 = 简单可靠**：无 mode、无状态机、无 toCompact、无注入循环。hook 30 行，state.ts 直接删除。
 
 ## 放弃的替代方案
-- 把整个 SOP 压成 200 token 写进 prompt（仍每轮付税，且仍依赖模型自觉）
-- 只改 skill 不加 hook（hook 才能在不付 token 税前提下做等价检测/熔断）
-- 为每个模型写独立 prompt 分支（违反"薄扩展"原则，且模型路由会随 pi 升级变化）
+- v1 的"等价检测连续 N 次升级 STRICT"：等价 ≠ 漂移；连续等价可能是遗忘也可能是确认
+- "NEUTRAL 计数到 N 升级"：破坏合法长程分析
+- "fingerprint 列表注入 context"：污染 context，且对认真探索的 LLM 是噪音
+- "每步发到 LLM 的 anti-drift 块"：完全抵消 v1 想避免的"长 SOP 负优化"
 
 ## 模型自适应如何实现
-- hook 是模型无关代码（fingerprint/evidence/detector 跨模型一致）
-- 常驻 4 原则是三模型共识最低集（"动作为决策服务/不重复/不混层/停滞切维度"）
-- skill 描述触发机制由 pi 已有 description matching 承担，不在 prompt 里
+- hook 是模型无关代码
+- 常驻 4 原则是三模型共识最低集
+- skill 按描述触发，按需加载
+- LLM 自行决定何时切换假设/层级/工具——这是判断不是门禁
 
 ## 不变式核对
-- `grep -r "@earendil" core/` 必空（runtime-agnostic）
-- doctrine 总 token < 1000（meta-principles 124 + collaboration-doctrine 401 + anti-drift ~120 ≈ 645）
-- context-feed 注入 ≤ 3000 bytes/turn（anti-drift 状态走独立通道，≤ 300 bytes）
+- `grep -r "@earendil" core/` 必空
+- doctrine 总 ~900 token < 1000
+- 无 context 注入（toCompact 已删除），不污染 LLM 视野
+- 单一职责：hook 只做"重复动作 → warn"一件事
+- 操作员可见：stderr + events.jsonl
+- 操作员可静默：`PI_ANTIDRIFT_DISABLED=1`
+
+## 教训（写给未来的自己）
+设计 discipline 工具时反复出现的陷阱：把"防止失败"误等同于"防止动作"。**drift 是失去目标，不是动作慢/动作多**。任何"X 步之内无产出 = 失败"的规则都假设 hook 知道目标——它不知道，LLM 才知道。

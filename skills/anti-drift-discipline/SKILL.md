@@ -7,47 +7,47 @@ description: >-
   direction. Do NOT use for clear implementation, simple Q&A, or single-path tasks.
 ---
 
-# Anti-Drift Discipline (reference — runtime enforcement is in extensions/anti-drift.ts)
+# Anti-Drift Discipline (judgment reference, not runtime enforcement)
 
 The four core rules are always in your system prompt (see prompts/anti-drift.md).
 This file is the extended reference: layer model, evidence classification,
-fingerprint/equivalence semantics, stall recovery, and termination criteria.
-Read it when a task enters exploratory mode; the runtime hook will then enforce
-these rules without requiring you to recite them every step.
+fingerprint semantics, stall recovery, and termination criteria. Read it when
+a task enters exploratory mode.
 
-## Activation (when to enter STRICT mode)
+## What the runtime does — and does not do
 
-Enter STRICT when ANY of:
-- Two semantically equivalent tool calls in a row (runtime hook will warn)
-- A hypothesis was implicitly refuted by new evidence but you continued
-- The same layer is being mixed with another layer in a single action
-- The search frontier grows without an exit condition
-- A previously ruled-out hypothesis reappears in working set
+The runtime hook (`extensions/anti-drift.ts`) does exactly one thing: it
+detects when a tool call is identical to the immediately previous tool call
+(same tool, same target, same parameters) and writes a warning to stderr
+and `events.jsonl`. The warning is for the human operator. It does NOT
+appear in your context. The LLM is trusted to know what it is doing —
+including when "monkey-sort" exploration is the right move.
 
-Exit STRICT when one full action produces a decision-changing observation.
+What the runtime does NOT do:
+- It does NOT count steps, tokens, or neutral actions.
+- It does NOT auto-escalate to any "strict" mode.
+- It does NOT inject state, counters, or fingerprints into your context.
+- It does NOT block, gate, or interrupt your flow.
 
-## Working state (maintain once, update in place)
+If you want to silence the runtime entirely (e.g. for a session that
+intentionally retries), set `PI_ANTIDRIFT_DISABLED=1`.
 
-Persist the state in the blackboard (board tool) or a task-local file, NOT
-in every turn's visible output. Use the runtime hook to inject it as ≤ 300 bytes.
+## What "drift" actually means here
 
-```
-goal:
-success_criteria:
-active_layer:
-active_hypothesis:
-ruled_out:
-confirmed:
-next_probe:
-exit_condition:
-```
+Drift is losing the goal. It is NOT:
+- repeating an action intentionally to confirm an observation,
+- reading a large file once per line during a long analysis,
+- trying many variants of a parameter when the search space warrants it,
+- "monkey-sorting" through hypotheses before committing to one.
 
-## Rule 1: Scope and layer lock
+A long, exploratory, even inefficient investigation is fine, as long as
+every action still serves the goal you stated at the start.
 
-Define the layer graph for the current task at start. Do NOT hard-code a
-generic four-layer model. Examples:
+## Layer model (build your own — do not rely on a fixed table)
 
-| Domain | Layer chain (illustrative, not exhaustive) |
+Define layers for the current task at start. Examples (illustrative, not exhaustive):
+
+| Domain | Layer chain |
 |---|---|
 | reverse engineering (with protections) | detection → protection → logic → data |
 | production incident | symptom → environment → interface → concurrency → state → persistence |
@@ -57,7 +57,7 @@ generic four-layer model. Examples:
 Only one active_layer at a time. Cross-layer evidence may be recorded, but
 investigating another layer requires an explicit `from → to: reason` switch.
 
-## Rule 2: Discriminating probe
+## Discriminating probe
 
 Before any non-trivial action, answer:
 
@@ -71,13 +71,9 @@ Execute only if the action will (a) confirm or refute a hypothesis,
 (b) constrain the search range, (c) set up a follow-up probe, or
 (d) produce a verifiable intermediate artifact.
 
-Forbidden:
-- "Read more code" with no termination condition
-- Parameter tweaks without a theory
-- Tool calls because the tool exists
-- Re-running the same probe with cosmetic changes
+This is judgment. The runtime does not enforce it.
 
-## Rule 3: Evidence classification
+## Evidence classification
 
 After every probe, classify the result:
 
@@ -89,32 +85,37 @@ After every probe, classify the result:
 | ENABLE   | sets up a future discriminating probe |
 | NEUTRAL  | no decision-changing information |
 
-Only the first four count as progress. The runtime hook classifies
-`NEUTRAL` automatically from tool output shape; do not self-declare `CONFIRM`
-without explicit evidence.
+Only the first four count as progress. But "NEUTRAL" is not a sin —
+it is information about the probe, not a verdict on the explorer.
+A long stretch of NEUTRAL results during a deep analysis (e.g. reading
+a 50,000-line disassembly) is legitimate; you may be loading context
+for a future decision.
 
-## Rule 4: Stall circuit breaker
+## Stall recovery
 
-Triggered automatically by the runtime hook after a configurable run of
-NEUTRAL actions (default: 3). When triggered, vary exactly one of:
+If you notice you have stopped making decision-changing progress, vary
+exactly one of:
 
 ```
 hypothesis | layer | tool | input | granularity | observation point
 ```
 
-Then re-evaluate. Do not loop on parameter tweaks; that is the canonical
-sign of an unfalsifiable hypothesis.
+If you are in a long, low-yield stretch that you know is part of the work
+(loading context, mapping a large surface, replaying traffic), do NOT
+"vary" just to satisfy a heuristic. Press on; the goal is what matters.
 
-## Rule 5: Event-anchored checkpoints (NOT per-step)
+## Event-anchored checkpoints (NOT per-step)
 
 Write a full anchor only on these events:
 - active hypothesis confirmed or refuted
 - active layer switch
 - search route change
-- stall circuit breaker triggered
-- context about to be compressed
+- about to compress context
 - high-cost or irreversible action imminent
 - phase result to user
+
+Per-step anchors are NOT required and pollute context. There is no
+runtime pressure to produce them.
 
 Anchor format:
 
@@ -127,10 +128,7 @@ next:
 exit_condition:
 ```
 
-Per-step anchors are NOT required and pollute context. The runtime hook
-will only inject the current state, not historical anchors.
-
-## Rule 6: Termination
+## Termination
 
 Stop when ONE of:
 
@@ -151,4 +149,6 @@ why_current_path_cannot_continue:
 cheapest_unblocking_action:
 ```
 
-Do NOT substitute repeated retries for a block declaration.
+Do NOT substitute repeated retries for a block declaration. And do NOT
+declare "blocked" just because progress feels slow — declare blocked when
+the current path genuinely cannot continue.
