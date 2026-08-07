@@ -10,10 +10,14 @@ description: >-
 
 ## 0. RELATED ROUTING
 
-- [stack-overflow-and-rop](../stack-overflow-and-rop/SKILL.md) — ROP chains to bypass NX, ret2libc for ASLR bypass
-- [format-string-exploitation](../format-string-exploitation/SKILL.md) — primary method for leaking canary, PIE, libc addresses
-- [heap-exploitation](../heap-exploitation/SKILL.md) — heap attacks for RELRO bypass (when GOT is read-only)
-- [arbitrary-write-to-rce](../arbitrary-write-to-rce/SKILL.md) — what to overwrite when GOT is protected by RELRO
+- [symbolic-execution-tools](../symbolic-execution-tools/SKILL.md) — angr/Z3 for automated constraint solving when bypass needs precise input crafting
+- [anti-debugging-techniques](../anti-debugging-techniques/SKILL.md) — when protected binary also has anti-debug layers blocking dynamic analysis
+- [code-obfuscation-deobfuscation](../code-obfuscation-deobfuscation/SKILL.md) — when protections are combined with obfuscation (common in CTF)
+- [re-escalation](../re-escalation/SKILL.md) — when current bypass approach repeatedly fails, escalate strategy
+
+### Exploitation Techniques (inline — no separate skill)
+
+> ROP/ret2libc, format string, heap exploitation, and arbitrary-write-to-RCE techniques are covered in §2-§5 of this document (ASLR bypass, NX bypass, RELRO bypass, canary bypass). For deeper ROP chain construction with angr, load [ANGR_COOKBOOK.md](../symbolic-execution-tools/ANGR_COOKBOOK.md).
 
 ### Advanced Reference
 
@@ -145,7 +149,7 @@ rop += p64(shellcode_addr)                 # jump to shellcode on now-executable
 | `.fini_array` | If writable | Overwrite destructor function pointers |
 | Stack return address | Direct stack write | Overwrite return address for ROP |
 
-See [arbitrary-write-to-rce](../arbitrary-write-to-rce/SKILL.md) for comprehensive target list.
+See §5.3 "Full RELRO Alternative Targets" table above for comprehensive target list.
 
 ---
 
@@ -293,3 +297,15 @@ Binary analysis: checksec output
     ├── 1/16 brute-force
     └── Stay in-bounds for relative corruption
 ```
+
+---
+
+## 11. STOP CONDITIONS — When to Abandon Current Path
+
+| Signal | Action |
+|--------|--------|
+| 3+ failed attempts at same bypass with no new info gained | Switch to alternative bypass method within same protection category |
+| Protection combination makes all known bypasses infeasible (e.g., Full RELRO + glibc≥2.34 + CET + no info leak primitive) | Report as "likely not exploitable with current primitives", document what's missing |
+| Binary requires kernel exploit or hardware-specific condition not available in current environment | Stop exploitation attempt, report constraint clearly |
+| Spent >30 min on single protection layer without measurable progress | Step back: re-run `checksec`, re-read decompilation, verify assumptions about protection level |
+| Same error pattern repeating across different bypass attempts | Problem is likely at a different layer — escalate via [re-escalation](../re-escalation/SKILL.md) |

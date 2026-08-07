@@ -405,3 +405,142 @@ Interceptor.attach(Module.getExportByName(null, 'clock_gettime'), {
 4. Check: NtSetInformationThread (HideFromDebugger)
 5. Check: GetTickCount, QueryPerformanceCounter
 6. Apply → restart debugging session
+
+---
+
+## 9. iOS ANTI-DEBUG & ANTI-JAILBREAK DETECTION
+
+### Detection Vectors
+
+| # | Detection Method | API/Mechanism | What It Checks | Reliability |
+|---|-----------------|---------------|----------------|-------------|
+| 1 | sysctl P_TRACED | `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid)` | kp_proc.p_flag & P_TRACED | High |
+| 2 | ptrace deny | `ptrace(PT_DENY_ATTACH, 0, 0, 0)` | Prevents debugger attachment | High |
+| 3 | File existence | `access()` / `stat()` / `NSFileManager` | Cydia.app, sshd, apt, bash, etc. | Medium (easy to hook) |
+| 4 | URL scheme | `UIApplication canOpenURL:` | cydia://, sileo:// | Low (easy to hook) |
+| 5 | Dylib enumeration | `_dyld_image_count()` + `_dyld_get_image_name()` | Substrate, Frida dylibs in load list | High |
+| 6 | Environment vars | `getenv("DYLD_INSERT_LIBRARIES")` | Injected library paths | Medium |
+| 7 | Sandbox integrity | `sandbox_check(pid, "process-fork", ...)` | Fork allowed = jailbroken | Medium |
+| 8 | Symbol resolution | `dlsym(RTLD_DEFAULT, "MSHookFunction")` | Substrate/Frida symbols in memory | High |
+| 9 | Integrity check | Code hash validation at runtime | Detects inline hooks / patches | Very High |
+| 10 | Port scan | Connect to localhost:27042 (Frida default) | Frida server running | Medium |
+| 11 | Exception-based | Set invalid instruction, catch signal | Debugger alters signal delivery | Medium |
+| 12 | Timing check | `mach_absolute_time()` between instructions | Debugger slows execution | Low (unstable) |
+
+### Bypass Quick Reference
+
+| Detection | Bypass Method | Frida Script Pattern |
+|-----------|--------------|---------------------|
+| sysctl P_TRACED | Hook `sysctl`, clear P_TRACED flag in result | `Interceptor.attach(Module.findExportByName(null, "sysctl"), ...)` |
+| ptrace deny | Hook `ptrace`, return 0 when PT_DENY_ATTACH | `Interceptor.attach(Module.findExportByName(null, "ptrace"), { onEnter: if(args[0]==31) ... })` |
+| File checks | Hook `access`/`stat`/NSFileManager, return ENOENT for blacklisted paths | See mobile-dynamic-re §4.1 |
+| Dylib enum | Hook `_dyld_get_image_name`, filter suspicious names | Filter strings containing "frida", "substrate", "substitute" |
+| getenv | Hook `getenv`, return NULL for DYLD_* keys | `Interceptor.attach(Module.findExportByName(null, "getenv"), ...)` |
+| dlsym | Hook `dlsym`, return NULL for hook-framework symbols | Return NULL for "MSHookFunction", "frida_agent_main" |
+| Integrity check | Avoid inline hooks (use Stalker), or hook the check function itself | Load re-escalation if integrity check is comprehensive |
+| Port scan | Use non-default Frida port (`-l 0.0.0.0:12345`) | Configuration change, not code |
+
+### iOS Bypass Priority (覆盖率分析)
+
+| Priority | Checks to Bypass | Effort | Covers |
+|----------|-----------------|--------|--------|
+| 1st (do these first) | File existence + URL scheme + getenv | 5 min | ~60% of apps |
+| 2nd | Dylib enum + dlsym + sysctl | 15 min | ~85% of apps |
+| 3rd | Integrity checks + timing | 30-60 min | ~95% of apps |
+| 4th | Custom/proprietary detection | Hours | Remaining 5% |
+
+---
+
+## 10. ANDROID ANTI-DEBUG & ANTI-ROOT DETECTION
+
+### Detection Vectors
+
+| # | Detection Method | Mechanism | What It Checks | Reliability |
+|---|-----------------|-----------|----------------|-------------|
+| 1 | TracerPid | Read `/proc/self/status` | TracerPid != 0 means being traced | High |
+| 2 | /proc/self/maps | Read process memory map | Look for frida-agent, xposed entries | High |
+| 3 | su binary | `access("/system/bin/su")` / `which su` | su exists = rooted | Medium |
+| 4 | Root packages | Check installed packages | SuperSU, Magisk Manager, KernelSU | Medium |
+| 5 | Build props | `android.os.Build` fields | test-keys, userdebug | Low |
+| 6 | SELinux status | `getenforce` | Permissive = likely rooted | Medium |
+| 7 | Mount points | Parse `/proc/mounts` | Magisk overlay mounts | High (hard to hide) |
+| 8 | Native fork detection | `fork()` + `ptrace(PTRACE_TRACEME)` | If ptrace fails, debugger attached | High |
+| 9 | Thread enumeration | `/proc/self/task/` | Unexpected threads (Frida agent) | Medium |
+| 10 | Socket scan | Enumerate `/proc/net/tcp` | Frida default port 27042 | Medium |
+| 11 | Java debugger | `android.os.Debug.isDebuggerConnected()` | JDWP attached | High |
+| 12 | Signal handling | SIGTRAP delivery timing | Debugger intercepts signals | Medium |
+
+### Bypass Quick Reference
+
+| Detection | Bypass Method | Implementation |
+|-----------|--------------|----------------|
+| TracerPid | Hook `open("/proc/self/status")`, replace TracerPid line | Return "TracerPid:\t0" in hooked read |
+| /proc/self/maps | Hook file read, filter frida/xposed lines | String filtering in read() result |
+| su binary | Hook `access()`, return -1 for su paths | Interceptor on `access` syscall |
+| Root packages | Hook PackageManager.getPackageInfo | Java.use → return PackageNotFoundException |
+| Build props | Hook SystemProperties.get | Return "release-keys" for ro.build.tags |
+| Magisk | Use MagiskHide / Zygisk DenyList | Configuration, not code |
+| isDebuggerConnected | Hook method, return false | `Java.use("android.os.Debug").isDebuggerConnected.implementation = () => false` |
+| Fork+ptrace | Hook ptrace, return 0 | Native Interceptor |
+
+### Android Bypass Priority
+
+| Priority | Checks | Effort | Covers |
+|----------|--------|--------|--------|
+| 1st | su/root packages + Build props | 5 min | ~50% of apps |
+| 2nd | TracerPid + /proc/self/maps | 10 min | ~75% of apps |
+| 3rd | Magisk detection + mount points | 15 min | ~90% (use Zygisk) |
+| 4th | Custom native checks | 30+ min | Remaining |
+
+---
+
+## 11. FRIDA DETECTION & COUNTERMEASURES
+
+### How Apps Detect Frida
+
+| # | Detection Vector | Mechanism | Difficulty to Bypass |
+|---|-----------------|-----------|---------------------|
+| 1 | Default port (27042) | TCP connect to localhost:27042 | Easy (change port) |
+| 2 | frida-server process name | Enumerate /proc, check cmdline | Easy (rename binary) |
+| 3 | D-Bus protocol | Send D-Bus AUTH message on connections | Medium |
+| 4 | Library mapping | /proc/self/maps contains "frida-agent" | Medium (hook read) |
+| 5 | Thread naming | frida threads have distinctive names | Medium (hook pthread) |
+| 6 | Inline hook detection | Check function prologues for hook trampolines | Hard |
+| 7 | Memory scanning | Scan for known Frida gadget strings/signatures | Hard |
+| 8 | Code page permissions | RWX pages indicate JIT (Frida Stalker) | Medium |
+| 9 | Exception port (iOS) | Mach exception ports registered by Frida | Hard |
+| 10 | Symbol scanning | dladdr/dlsym for Frida internal symbols | Medium |
+
+### Stealth Configuration
+
+```
+# Basic stealth (defeats 70% of detection)
+frida -l script.js -H device:12345 --runtime=v8   # non-default port
+
+# Rename frida-server (defeats process name scan)
+cp frida-server /usr/bin/fs-daemon
+/usr/bin/fs-daemon -l 0.0.0.0:12345
+
+# Use frida-gadget (inject into app, no server process)
+# Most stealthy — no external process, no default port
+```
+
+### Advanced: Avoid Hook Detection
+
+| Technique | When to Use | Trade-off |
+|-----------|-------------|----------|
+| Stalker (code tracing) | When target checks for inline hooks | Slower, but zero code modification |
+| Spawn + early hook | When timing-based detection runs at init | Must hook before detection code runs |
+| LD_PRELOAD injection | When Frida itself is detected | Different injection vector |
+| Kernel-level (kprobes) | Last resort, all userland methods failed | Requires root + kernel module |
+| Emulation (→ emulation-re) | When all dynamic approaches blocked | Different paradigm entirely |
+
+### Decision: When to Switch from Dynamic to Emulation
+
+If ALL of these are true, stop trying Frida and switch to emulation:
+1. App uses integrity checks (can't modify code)
+2. App detects Frida by memory scanning (can't inject)
+3. App uses anti-tamper on detection functions themselves (can't bypass)
+
+→ Load [emulation-re](../emulation-re/SKILL.md) for offline approach
+→ Load [re-escalation](../re-escalation/SKILL.md) for systematic upgrade

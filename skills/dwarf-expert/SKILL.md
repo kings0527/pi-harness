@@ -21,6 +21,12 @@ This skill provides technical knowledge and expertise about the DWARF standard a
 - **Binary Reverse Engineering**: Use dedicated RE tools (Ghidra, IDA) unless specifically analyzing DWARF sections.
 - **Compiler Debugging**: DWARF generation issues are compiler-specific, not covered here.
 
+## Related Skills
+
+- When the binary has DWARF stripped and uses custom obfuscation → [code-obfuscation-deobfuscation](../code-obfuscation-deobfuscation/SKILL.md)
+- When you need to bypass anti-debug protections to attach a debugger for DWARF-aware debugging → [anti-debugging-techniques](../anti-debugging-techniques/SKILL.md)
+- When analyzing a native binary with complex protections that may or may not have debug info → [re-router](../re-router/SKILL.md) (start here for routing)
+
 # Authoritative Sources
 When specific DWARF standard information is needed, use these authoritative sources:
 
