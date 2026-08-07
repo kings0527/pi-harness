@@ -299,7 +299,7 @@ AI Agent 可直接调用以下工具执行分析任务，无需手动操作 DevT
 - **webcrack**：离线 AST 反混淆，WebTrace 的 `deobfuscate` 提供在线版本（直接对页面代码操作）
 - **curl_cffi**：签名复现验证，WebTrace 的 `hook_api` + `get_hook_logs` 用于捕获签名参数
 
-> 详细使用说明见 `references/webtrace-mcp.md`
+> 详细使用说明见上方 §3.3 WebTrace MCP 章节
 
 ---
 
@@ -398,7 +398,7 @@ function decryptStrings(code) {
 
 **核心模式识别**：`"2|4|3|0|1".split("|")` + switch-case状态机
 
-webcrack的 `control-flow-switch.ts` 实现原理（详见 `references/deobfuscation.md`）：
+webcrack的 `control-flow-switch.ts` 实现原理：
 
 1. **匹配模式**：识别 `const sequence = "数字串".split("|")` + `while(true) { switch(sequence[iterator++]) { case "0": ... } }`
 2. **提取序列**：从字符串字面量中提取执行顺序，如 `"2|4|3|0|1"` → `[2,4,3,0,1]`
@@ -439,7 +439,7 @@ console.log("step5");
 - **栈式VM**（如jsvmp项目）：操作数通过栈传递，`PUSH a; PUSH b; ADD` → 弹出b和a，计算a+b，推入结果
 - **寄存器式VM**（如新版腾讯VMP）：操作数通过虚拟寄存器传递，`ADD R1, R2, R3` → R1=R2+R3
 
-**jsvmp项目指令集**（详见 `references/jsvmp-architecture.md`，38条操作码）：
+**jsvmp项目指令集**（38条操作码，见下方操作码表）：
 
 | 分组 | 操作码 | 范围 |
 |------|--------|------|
@@ -705,7 +705,7 @@ curl -b "cookies.txt; __zse_ck=$ZSE_CK" "https://www.zhihu.com/api/v4/..."
 
 ### 6.3 nodriver实现详解
 
-nodriver（详见 `references/cdp-bypass.md`，v0.50.3）的核心优势：
+nodriver（v0.50.3）的核心优势：
 
 1. **直接CDP WebSocket通信**：不通过Playwright/Selenium中间层，直接用Python与Chrome DevTools Protocol通信
 2. **无WebDriver协议**：完全绕过 `navigator.webdriver` 检测
@@ -727,7 +727,7 @@ uc.loop().run_until_complete(main())
 
 ### 6.4 rebrowser-patches三策略详解
 
-详见 `references/cdp-bypass.md`：
+rebrowser-patches三策略：
 
 **策略1：addBinding（推荐）**
 - 在主世界创建随机名称的binding
@@ -768,20 +768,22 @@ uc.loop().run_until_complete(main())
 
 ## 参考文档索引
 
-| 文档 | 路径 | 说明 |
-|------|------|------|
-| 环境修补 | references/env-patching.md | Proxy监测法、BOM/DOM伪造、反检测技术 |
-| CDP绕过 | references/cdp-bypass.md | nodriver/patchright/rebrowser-patches |
-| JS反混淆 | references/deobfuscation.md | webcrack、控制流还原、字符串解密 |
-| JSVMP逆向 | references/jsvmp-reverse-methodology.md | 五步法、操作码分析、执行追踪 |
-| JSVMP架构 | references/jsvmp-architecture.md | 38条指令集、栈式/寄存器式VM |
-| 协议指纹 | references/protocol-fingerprinting.md | JA3/JA4、HTTP/2、QUIC |
-| WASM逆向 | references/wasm-reverse.md | wabt、Ghidra、加密算法识别 |
-| 多重保护 | references/layered-protection-bypass.md | 分层击破策略 |
-| 反爬维护 | references/anti-crawler-maintenance.md | 监控、更新、持久化 |
-| 网络拦截 | references/network-interception.md | mitmproxy、请求修改 |
-| Chrome Extension | references/chrome-extension-helper.md | 扩展开发与注入 |
-| 调试技巧 | references/debugging-techniques.md | 断点、LogPoint、条件调试 |
-| AI逆向 | references/ai-reverse-tools.md | MCP Server、AI辅助分析 |
-| WebTrace MCP | references/webtrace-mcp.md | MCP工具集详细使用指南 |
-| 参考项目 | references/git-references.md | Git清单、开源项目索引 |
+> **NOTE**: 以下参考文档计划在未来拆分为独立文件。相关内容已内嵌于本文档对应章节中。
+
+| 主题 | 对应章节 | 覆盖内容 |
+|------|---------|----------|
+| 环境修补 | §5 反检测 | Proxy监测法、BOM/DOM伪造、反检测技术 |
+| CDP绕过 | §6 CDP检测绕过 | nodriver/patchright/rebrowser-patches |
+| JS反混淆 | §4.1-4.3 | webcrack、控制流还原、字符串解密 |
+| JSVMP逆向 | §4.4 JSVMP五步法 | 操作码分析、执行追踪、语义恢复 |
+| JSVMP架构 | §4.4 | 38条指令集、栈式/寄存器式VM架构 |
+| 协议指纹 | §1.1 协议层 | JA3/JA4、HTTP/2、QUIC指纹 |
+| WASM逆向 | §4.5（如有）或§4 | wabt、Ghidra、加密算法识别 |
+| 多重保护 | §7 Decision Tree | 分层击破策略 |
+| 反爬维护 | §8（如有）或文末 | 监控、更新、持久化 |
+| 网络拦截 | §2 工具链 | mitmproxy、请求修改 |
+| Chrome Extension | §3 工具链 | 扩展开发与注入 |
+| 调试技巧 | §3 调试方法 | 断点、LogPoint、条件调试 |
+| AI逆向 | §3.3 AI工具 | MCP Server、AI辅助分析 |
+| WebTrace MCP | §3.3 | MCP工具集使用指南 |
+| 参考项目 | 文末 | Git清单、开源项目索引 |
