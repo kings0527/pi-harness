@@ -28,6 +28,11 @@ export default async function (pi: any) {
     const doctrine = readPrompt("collaboration-doctrine.md");
     if (doctrine) sections.push(doctrine);
 
+    // ADR-0009: anti-drift 作为常驻 4 原则注入 (~120 tokens)。完整纪律由
+    // skills/anti-drift-discipline 描述触发加载，runtime 由 extensions/anti-drift.ts 执行。
+    const antiDrift = readPrompt("anti-drift.md");
+    if (antiDrift) sections.push(antiDrift);
+
     if (sections.length === 0) return;
 
     return {

@@ -1,116 +1,154 @@
 ---
 name: anti-drift-discipline
 description: >-
-  Anti-drift discipline for chaotic analysis tasks. Use when searching for signal in noise: reverse engineering, root cause analysis, debugging, vulnerability hunting, or any task where you must find a needle in a haystack without losing direction.
+  Anti-drift discipline for chaotic analysis tasks. Use when searching for signal
+  in noise: reverse engineering, root cause analysis, debugging, vulnerability
+  hunting, or any task where you must find a needle in a haystack without losing
+  direction. Do NOT use for clear implementation, simple Q&A, or single-path tasks.
 ---
 
-# SKILL: 反漂移纪律（Anti-Drift Discipline）
+# Anti-Drift Discipline (reference — runtime enforcement is in extensions/anti-drift.ts)
 
-> **AI LOAD INSTRUCTION**: 强约束分析纪律。在一切"混沌中定位目标"的任务中强制执行。核心作用：防止你在同一条死路上反复消耗，强制收敛，强制产出。
+The four core rules are always in your system prompt (see prompts/anti-drift.md).
+This file is the extended reference: layer model, evidence classification,
+fingerprint/equivalence semantics, stall recovery, and termination criteria.
+Read it when a task enters exploratory mode; the runtime hook will then enforce
+these rules without requiring you to recite them every step.
 
-## 触发条件（When to Use）
+## Activation (when to enter STRICT mode)
 
-- 逆向分析（算法还原、签名破解、协议解码）
-- 故障诊断（生产问题排查、崩溃根因定位）
-- 漏洞挖掘（攻击面分析、exploit 开发）
-- 数据溯源（日志追踪、链路还原）
-- 任何"搜索空间巨大、目标模糊、容易迷失方向"的探索性任务
+Enter STRICT when ANY of:
+- Two semantically equivalent tool calls in a row (runtime hook will warn)
+- A hypothesis was implicitly refuted by new evidence but you continued
+- The same layer is being mixed with another layer in a single action
+- The search frontier grows without an exit condition
+- A previously ruled-out hypothesis reappears in working set
 
-## 不触发条件（When NOT to Use）
+Exit STRICT when one full action produces a decision-changing observation.
 
-- 明确的实现任务（"写一个函数做 X"）
-- 简单问答（"这段代码什么意思"）
-- 机械性操作（格式化、重命名、配置修改）
-- 目标清晰且路径唯一的任务
+## Working state (maintain once, update in place)
 
----
-
-## 纪律 1：信息停滞即换
-
-判据是**认知增量**，不是次数或时间。
-
-连续动作不再产生新信息时，MUST 切换路径。
-
-| 新信息（继续） | 非新信息（停滞） |
-|---------------|----------------|
-| 不同的报错 | 重复的报错 |
-| 更窄的范围 | 同样的范围 |
-| 新排除的假设 | 没有排除任何东西 |
-| 之前未见的行为 | "微调参数再试一次" |
-
-核心问题：**上一次动作之后，我的认知比之前多了什么？**
-
-答不出来 = 停滞 = 必须换路径。
-
----
-
-## 纪律 2：层级锁定
-
-开始前 MUST 声明当前工作层级：
+Persist the state in the blackboard (board tool) or a task-local file, NOT
+in every turn's visible output. Use the runtime hook to inject it as ≤ 300 bytes.
 
 ```
-检测层 → 保护层 → 逻辑层 → 数据层
+goal:
+success_criteria:
+active_layer:
+active_hypothesis:
+ruled_out:
+confirmed:
+next_probe:
+exit_condition:
 ```
 
-禁止跨层混打。发现问题在另一层，MUST 显式声明切换，说明原因，再动手。
+## Rule 1: Scope and layer lock
 
-违规信号：你正在同时处理两个层的问题。立即停下，选一个。
+Define the layer graph for the current task at start. Do NOT hard-code a
+generic four-layer model. Examples:
 
----
+| Domain | Layer chain (illustrative, not exhaustive) |
+|---|---|
+| reverse engineering (with protections) | detection → protection → logic → data |
+| production incident | symptom → environment → interface → concurrency → state → persistence |
+| browser exploit | input → parser → IR/optimization → memory model → scheduler → sandbox |
+| JS VMP | payload → scheduler → virtual ISA → state machine → semantics → bindings |
 
-## 纪律 3：收敛不发散
+Only one active_layer at a time. Cross-layer evidence may be recorded, but
+investigating another layer requires an explicit `from → to: reason` switch.
 
-每一步 MUST 缩小搜索空间。
+## Rule 2: Discriminating probe
 
-合格的一步：
-- 排除了一个假设
-- 定位到更精确的范围
-- 获得了一个新约束条件
-
-不合格的一步：
-- "看看这个函数做什么"（无假设驱动）
-- "试试另一个参数"（无理论支撑）
-- "多读点代码"（无终止条件）
-
----
-
-## 纪律 4：假设驱动
-
-禁止无目的探索。每次行动前 MUST 有可证伪假设：
+Before any non-trivial action, answer:
 
 ```
-假设：[具体猜测]
-验证：[一个动作]
-成立→ [下一步]
-不成立→ [排除什么，换什么]
+H: what hypothesis am I testing?
+O: what observation would distinguish it?
+D: how would each outcome change the next decision?
 ```
 
-没写出这四行就动手 = 漂移。
+Execute only if the action will (a) confirm or refute a hypothesis,
+(b) constrain the search range, (c) set up a follow-up probe, or
+(d) produce a verifiable intermediate artifact.
 
----
+Forbidden:
+- "Read more code" with no termination condition
+- Parameter tweaks without a theory
+- Tool calls because the tool exists
+- Re-running the same probe with cosmetic changes
 
-## 纪律 5：信息断流熔断
+## Rule 3: Evidence classification
 
-当最近一段工作没有产出任何新认知时（按任务实际周期判断，不卡死分钟数），MUST 触发：
+After every probe, classify the result:
 
-1. 退一步：当前假设是否已被隐式证伪？
-2. 换一层：问题是否在更深/更浅的层？
-3. 换工具：当前工具是否不适合这个问题？
-4. 缩范围：能否只解决 70% 先交付？
+| Class | Meaning |
+|---|---|
+| CONFIRM  | result supports the active hypothesis |
+| REFUTE   | result disproves the active hypothesis |
+| CONSTRAIN| narrows or reshapes the search range |
+| ENABLE   | sets up a future discriminating probe |
+| NEUTRAL  | no decision-changing information |
 
-四个都回答了还没路 → 声明阻塞，停下。
+Only the first four count as progress. The runtime hook classifies
+`NEUTRAL` automatically from tool output shape; do not self-declare `CONFIRM`
+without explicit evidence.
 
----
+## Rule 4: Stall circuit breaker
 
-## 纪律 6：进度锚点
-
-每完成一个有效步骤，MUST 记录：
+Triggered automatically by the runtime hook after a configurable run of
+NEUTRAL actions (default: 3). When triggered, vary exactly one of:
 
 ```
-已知：[确认的事实]
-排除：[证伪的假设]
-当前：[正在验证什么]
-下一步：[具体动作]
+hypothesis | layer | tool | input | granularity | observation point
 ```
 
-丢了这个锚 = 漂移。
+Then re-evaluate. Do not loop on parameter tweaks; that is the canonical
+sign of an unfalsifiable hypothesis.
+
+## Rule 5: Event-anchored checkpoints (NOT per-step)
+
+Write a full anchor only on these events:
+- active hypothesis confirmed or refuted
+- active layer switch
+- search route change
+- stall circuit breaker triggered
+- context about to be compressed
+- high-cost or irreversible action imminent
+- phase result to user
+
+Anchor format:
+
+```
+confirmed:
+ruled_out:
+uncertain:
+active:
+next:
+exit_condition:
+```
+
+Per-step anchors are NOT required and pollute context. The runtime hook
+will only inject the current state, not historical anchors.
+
+## Rule 6: Termination
+
+Stop when ONE of:
+
+**Solved** — success_criteria met with reproducible evidence.
+
+**Bounded partial result** — distinguish:
+```
+verified_core:
+unverified:
+supported_claims:
+unsupported_claims:
+```
+
+**Blocked** — state explicitly:
+```
+missing: evidence | permission | tool | sample
+why_current_path_cannot_continue:
+cheapest_unblocking_action:
+```
+
+Do NOT substitute repeated retries for a block declaration.

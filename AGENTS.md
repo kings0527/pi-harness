@@ -13,9 +13,12 @@
 
 1. `grep -r "@earendil" core/` MUST return empty — core has no pi dependency.
 2. Total constant token injection (meta-principles + doctrine + tool descriptions) MUST stay < 1000 tokens.
+   Current evidence: meta-principles 124 + collaboration-doctrine 401 + anti-drift 166 ≈ 691 words (~900 tokens) — under cap.
 3. Context feed budget: ≤ 3000 bytes per turn (managed in `extensions/context-feed.ts`).
 4. Board storage: `.pi-board/` (project-local, append-only JSONL + markdown snapshots).
 5. All architectural decisions documented in `docs/decisions/` (10-line ADR format).
+6. Anti-drift discipline is enforced by `extensions/anti-drift.ts` at runtime; the 4-rule
+   prompt is the only always-on injection; the full reference skill loads only on description match.
 
 ## Development Commands
 
