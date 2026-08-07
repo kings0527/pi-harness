@@ -1,6 +1,9 @@
-// ADR-0009: action fingerprint normalization.
-// Goal: detect "same tool, same target, same intent" without NLP.
-// Strategy: extract (tool, normalized-target, intent-key) and join with a separator.
+// ADR-0009 (revised): anti-drift fingerprint.
+// Pure data, runtime-agnostic. No pi imports.
+// Purpose: detect "same tool, same target, same intent" without NLP, so the
+// runtime can WARN a human (stderr + events.jsonl) when the model repeats an
+// action. We do NOT inject this into the model context — the LLM is trusted
+// to know what it is doing. Warnings are for the human operator, not the LLM.
 
 import { resolve } from "node:path";
 
@@ -11,8 +14,6 @@ export interface FingerprintInput {
 
 const SEP = "|";
 
-// Tool-specific intent keys. For tools we don't know, fall back to a generic key.
-// Adding a tool here is cheap; covering every tool is unnecessary.
 function intentKey(tool: string, input: Record<string, unknown> | undefined): string {
   const i = input ?? {};
   switch (tool) {
@@ -24,16 +25,12 @@ function intentKey(tool: string, input: Record<string, unknown> | undefined): st
     }
     case "bash": {
       const cmd = (i.command ?? i.cmd ?? "") as string;
-      // Strip line numbers, hex addresses, and trailing whitespace so
-      // `objdump -d 0x1000` and `objdump -d 0x1004` don't accidentally collide.
-      // We only collapse the most common volatile tokens; deep semantic
-      // equivalence is the LLM's job.
+      // Collapse volatile tokens: addresses, large numeric IDs, whitespace.
       const collapsed = cmd
         .replace(/0x[0-9a-fA-F]+/g, "0xADDR")
         .replace(/\b\d{4,}\b/g, "N")
         .replace(/\s+/g, " ")
         .trim();
-      // Take the first 80 chars — long enough to discriminate, short enough to be stable.
       return `cmd=${collapsed.slice(0, 80)}`;
     }
     case "edit":
@@ -48,7 +45,6 @@ function intentKey(tool: string, input: Record<string, unknown> | undefined): st
       return `q=${q};path=${normalizePath(p)}`;
     }
     default: {
-      // Generic: take the first 3 string keys in stable order.
       const keys = Object.keys(i).sort().slice(0, 3);
       return keys.map(k => `${k}=${String(i[k]).slice(0, 40)}`).join(";");
     }
@@ -56,8 +52,6 @@ function intentKey(tool: string, input: Record<string, unknown> | undefined): st
 }
 
 function normalizePath(p: string): string {
-  // Resolve to absolute so "./foo" and "foo" collide.
-  // Use process.cwd() as base — equivalent to what the model sees.
   try {
     return resolve(process.cwd(), p);
   } catch {

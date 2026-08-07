@@ -17,8 +17,10 @@
 3. Context feed budget: ≤ 3000 bytes per turn (managed in `extensions/context-feed.ts`).
 4. Board storage: `.pi-board/` (project-local, append-only JSONL + markdown snapshots).
 5. All architectural decisions documented in `docs/decisions/` (10-line ADR format).
-6. Anti-drift discipline is enforced by `extensions/anti-drift.ts` at runtime; the 4-rule
-   prompt is the only always-on injection; the full reference skill loads only on description match.
+6. Anti-drift discipline is enforced by `extensions/anti-drift.ts` at runtime. The hook ONLY warns on
+   tool calls identical to the immediately previous one (operator-visible via stderr + events.jsonl).
+   It does NOT inject into model context, count steps/tokens, or auto-escalate to any strict mode.
+   The 4-rule prompt is always-on judgment guidance; the full reference skill loads only on description match.
 
 ## Development Commands
 
