@@ -3,26 +3,29 @@ import { Type } from "typebox";
 import { listProfiles, loadProfile } from "../core/identity/index.ts";
 import { spawnAgent, spawnAgents } from "../core/spawn/index.ts";
 import type { SpawnOptions } from "../core/spawn/index.ts";
-import { listTopics } from "../core/board/index.ts";
+import { listTopics, openTopic, postNote, readNotes, closeTopic } from "../core/board/index.ts";
 import { getStormConfig } from "../core/storm/index.ts";
+import { getPhysarumConfig } from "../core/physarum/index.ts";
 
 export default async function(pi: any) {
   pi.registerTool({
     name: "spawn",
     label: "Spawn Subagents",
-    description: "Spawn subagents to investigate and post findings to the board. Actions: list, run (parallel agents), debate (storm adversarial).",
+    description: "Spawn subagents to investigate and post findings to the board. Actions: list, run (parallel agents), debate (storm adversarial), physarum (collective intelligence).",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("list"),
         Type.Literal("run"),
         Type.Literal("debate"),
+        Type.Literal("physarum"),
       ]),
       topic: Type.Optional(Type.String({ description: "Open topic the subagents collaborate on (required for run/debate)" })),
       agents: Type.Optional(Type.Array(Type.Object({
         profile: Type.String({ description: "Profile name, e.g. scout / worker / reviewer" }),
         task: Type.String({ description: "Concrete investigation task for this subagent" }),
       }), { description: "Subagents to launch in parallel (required for run)" })),
-      question: Type.Optional(Type.String({ description: "The specific question to debate (required for debate action)" })),
+      question: Type.Optional(Type.String({ description: "The specific question to debate/explore (required for debate/physarum action)" })),
+      angles: Type.Optional(Type.Array(Type.String(), { description: "Exploration angles for each tentacle (optional, physarum action)" })),
       timeoutMs: Type.Optional(Type.Integer({ description: "Per-agent timeout in ms (default 600000)" })),
     }),
     async execute(toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) {
@@ -144,6 +147,90 @@ export default async function(pi: any) {
               return `## ${r.name} [${models[i]}] (${status})\n${r.output || "(no output)"}`;
             }).join("\n\n");
             return { content: [{ type: "text" as const, text: `${debateFormatted}\n\n---\n⚡ Debate round complete (${debateResults.length} participants). Now \`board read ${params.topic}\` to synthesize all positions. Consider: where do they agree? Where is the evidence strongest? What remains unresolved?` }] };
+          }
+          case "physarum": {
+            if (!params.topic) throw new Error("topic is required for physarum");
+            if (!params.question) throw new Error("question is required for physarum");
+
+            const config = getPhysarumConfig();
+            if (!config.enabled) throw new Error("Physarum mode is disabled. Enable with /physarum on <models>");
+
+            // 校验主 topic open
+            const pTopics = listTopics();
+            const pMeta = pTopics.find((t: any) => t.id === params.topic);
+            if (!pMeta) throw new Error(`Topic "${params.topic}" not found`);
+            if (pMeta.status !== "open") throw new Error(`Topic "${params.topic}" is ${pMeta.status}, not open`);
+
+            const maxPulses = Math.min(config.maxPulses ?? 3, 5);
+            const tentacleCount = Math.min(config.tentacles ?? Math.max(config.models.length, 2), 6);
+
+            // 创建工作子 topic
+            const workingTopicId = `${params.topic}--physarum-${Date.now()}`;
+            openTopic(workingTopicId, params.question);
+
+            let actualPulses = 0;
+            try {
+              for (let pulse = 1; pulse <= maxPulses; pulse++) {
+                actualPulses = pulse;
+                const isFirstPulse = pulse === 1;
+                const isLastPulse = pulse === maxPulses;
+
+                // 构造 N 个 tentacle
+                const participants: SpawnOptions[] = [];
+                for (let i = 0; i < tentacleCount; i++) {
+                  const angle = params.angles?.[i];
+                  let taskBody: string;
+
+                  if (isLastPulse) {
+                    taskBody = `PULSE ${pulse}/${maxPulses} — SYNTHESIZE: Read the ENTIRE board. The collective has explored for ${pulse - 1} rounds. Now SYNTHESIZE: merge all findings into a coherent answer. Post your synthesis with priority="critical".\nQuestion: "${params.question}"`;
+                  } else if (isFirstPulse) {
+                    taskBody = `PULSE ${pulse}/${maxPulses} — DIVERGE: Explore this angle: "${angle || `pick a distinct direction after reading the board (you are tentacle ${i + 1} of ${tentacleCount})`}"\nQuestion: "${params.question}"`;
+                  } else {
+                    taskBody = `PULSE ${pulse}/${maxPulses} — BUILD & CONVERGE: Read the board. Build on the strongest leads from previous pulses. Deepen, refine, cross-pollinate. If your angle hit a dead end, pivot to reinforce a promising direction others found.\nQuestion: "${params.question}"`;
+                  }
+
+                  participants.push({
+                    profile: loadProfile("tentacle"),
+                    topic: workingTopicId,
+                    task: taskBody,
+                    cwd: process.cwd(),
+                    model: config.models[i % config.models.length],
+                    ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
+                  });
+                }
+
+                const phaseLabel = isFirstPulse ? "diverging" : isLastPulse ? "synthesizing" : "building & converging";
+                onUpdate?.({ content: [{ type: "text" as const, text: `🍄 Pulse ${pulse}/${maxPulses}: ${tentacleCount} tentacles ${phaseLabel}...` }] });
+
+                // 并行 spawn 本轮所有触角
+                const results = await spawnAgents(participants);
+
+                // 早停：所有输出都很短 → 自然收敛信号
+                if (!isFirstPulse && !isLastPulse) {
+                  const allBrief = results.every(r => (r.output?.length ?? 0) < 200);
+                  if (allBrief) {
+                    onUpdate?.({ content: [{ type: "text" as const, text: `📡 Pulse ${pulse}: all tentacles converged (brief outputs). Stopping early.` }] });
+                    break;
+                  }
+                }
+              }
+
+              // 从工作子 topic 提取综合结论（priority=critical 的 notes）
+              const allNotes = readNotes(workingTopicId);
+              const criticalNotes = allNotes.filter((n: any) => n.priority === "critical");
+              const synthesisContent = criticalNotes.length > 0
+                ? criticalNotes.map((n: any) => n.content).join("\n\n---\n\n")
+                : allNotes.slice(-tentacleCount).map((n: any) => `${n.author}: ${n.content}`).join("\n\n");
+
+              // 将综合结论 post 到主 topic
+              postNote(params.topic, "physarum", synthesisContent, { tags: ["physarum-synthesis"] });
+
+            } finally {
+              // 归档工作子 topic（零副作用保证）
+              try { closeTopic(workingTopicId); } catch {}
+            }
+
+            return { content: [{ type: "text" as const, text: `🌿 Physarum complete (${actualPulses} pulses, ${tentacleCount} tentacles). Collective synthesis posted to topic "${params.topic}".\n\nNow \`board read ${params.topic}\` to see the result, then consider \`board close\` → \`distill\`.` }] };
           }
           default:
             throw new Error(`Unknown action: ${params.action}`);
