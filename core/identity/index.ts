@@ -6,7 +6,7 @@ export interface AgentProfile {
   specialty: string[];
   confidence_bias?: string; // e.g. "avoid guessing"
   out_of_scope: string[];
-  interactionMode?: "collaborate" | "debate"; // debate = adversarial dialectic
+  interactionMode?: "collaborate" | "debate" | "explore"; // debate = adversarial dialectic, explore = physarum collective
 }
 
 // Agents root is relative to package root (same resolution as core/knowledge)
@@ -44,6 +44,15 @@ DEBATE DISCIPLINE (strict):
 5. STEEL-MAN: Before attacking an opposing view, restate it in its strongest possible form. Attack the strong version, not a straw man.
 `.trim();
 
+const PHYSARUM_DISCIPLINE = `
+COLLECTIVE INTELLIGENCE DISCIPLINE:
+1. READ FIRST: Read the board before any action. Others have contributed — build on their work.
+2. CONNECT: Reference other notes by #N. Your findings should link to the collective, not float alone.
+3. SIGNAL: Tag leads with tags=["lead"], dead ends with tags=["deadend"], breakthroughs with priority="critical".
+4. NO OVERLAP: Do not duplicate what others already explored.
+5. CONVERGE: If the board already contains a strong collective answer, reinforce it rather than opening new angles.
+`.trim();
+
 /**
  * Render the system prompt fragment for a spawned subagent:
  * role, specialty, out_of_scope (refuse when out of bounds),
@@ -70,6 +79,11 @@ export function renderSystemPrompt(profile: AgentProfile, topic: string, goal: s
   if (profile.interactionMode === "debate") {
     lines.push(``);
     lines.push(DEBATE_DISCIPLINE);
+  }
+
+  if (profile.interactionMode === "explore") {
+    lines.push(``);
+    lines.push(PHYSARUM_DISCIPLINE);
   }
 
   return lines.join("\n");

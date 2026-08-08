@@ -36,7 +36,7 @@ export default async function(pi: any) {
     const toolName = event.tool || event.toolName;
     if (toolName !== "spawn") return;
     const input = event.input || event.args;
-    if (input?.action !== "run" || !input?.topic) return;
+    if (!["run", "physarum"].includes(input?.action) || !input?.topic) return;
 
     const round = (spawnRounds.get(input.topic) ?? 0) + 1;
     spawnRounds.set(input.topic, round);
