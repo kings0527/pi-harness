@@ -42,7 +42,7 @@ function formatModelList(available: ModelInfo[]): string {
 
 export default async function(pi: any) {
   pi.registerCommand("physarum", {
-    description: "Toggle physarum mode (collective intelligence). Usage: /physarum on <models> | /physarum off | /physarum tentacles <N> | /physarum pulses <N> | /physarum (status)",
+    description: "Toggle physarum collective intelligence mode. Usage: /physarum on <models> | off | tentacles <N> (agents per pulse, 1-6) | pulses <N> (rounds: diverge→build→synthesize, 1-5) | (no args = status)",
     async handler(args: string, ctx: any) {
       const trimmed = args.trim();
 
@@ -50,7 +50,7 @@ export default async function(pi: any) {
       if (!trimmed) {
         const config = getPhysarumConfig();
         const status = config.enabled
-          ? `🍄 Physarum mode: ON\n   Models: ${config.models.join(", ")}\n   Tentacles: ${config.tentacles ?? "auto"}\n   Pulses: ${config.maxPulses ?? "auto (3)"}\n   Use \`spawn action=physarum, topic="<topic>", question="<question>"\` to trigger.`
+          ? `🍄 Physarum mode: ON\n   Models: ${config.models.join(", ")}\n   Tentacles: ${config.tentacles ?? "auto"}\n   Pulses: ${config.maxPulses ?? 3} (diverge → ${(config.maxPulses ?? 3) > 2 ? "build → " : ""}synthesize)\n   Use \`spawn action=physarum, topic="<topic>", question="<question>"\` to trigger.`
           : `Physarum mode: OFF\n   Enable with: /physarum on <model1>,<model2>`;
         pi.sendMessage({ customType: "physarum-status", content: status, display: "block" });
         return;
@@ -73,7 +73,7 @@ export default async function(pi: any) {
         }
         const config = getPhysarumConfig();
         setPhysarumConfig({ ...config, tentacles: n });
-        pi.sendMessage({ customType: "physarum-status", content: `Tentacles set to ${n}.`, display: "block" });
+        pi.sendMessage({ customType: "physarum-status", content: `Tentacles set to ${n} (${n} parallel agents per pulse, each exploring a different angle).`, display: "block" });
         return;
       }
 
@@ -87,7 +87,12 @@ export default async function(pi: any) {
         }
         const config = getPhysarumConfig();
         setPhysarumConfig({ ...config, maxPulses: n });
-        pi.sendMessage({ customType: "physarum-status", content: `Max pulses set to ${n}.`, display: "block" });
+        const pulsesMsg = n === 1
+          ? `Max pulses set to 1 (single-round: all tentacles explore + synthesize in one pass).`
+          : n === 2
+            ? `Max pulses set to 2.\n   Pulse 1 = diverge (explore angles), Pulse 2 = synthesize (merge findings).`
+            : `Max pulses set to ${n}.\n   Pulse 1 = diverge (explore angles), Pulse 2..${n-1} = build (read & cross-pollinate), Pulse ${n} = synthesize (merge findings).`;
+        pi.sendMessage({ customType: "physarum-status", content: pulsesMsg, display: "block" });
         return;
       }
 
