@@ -32,37 +32,44 @@ For each finding/decision in the topic, evaluate:
 
 For each candidate that passes Step 2:
 
-1. **Choose a path** in the knowledge tree: `knowledge/{domain}/{subdomain}/{filename}.md`
+0. **Choose the tier (ADR-0011 — fixed placement)**:
+   - `scope=project` (default) → `<project-root>/knowledge/`. Project-specific findings (this repo's bugs, audits, deploys). Travels with the repo.
+   - `scope=global` → `~/.pi-harness/knowledge/`. Cross-project reusable techniques (tool limitations, RE playbooks).
+   - Internal subdirectories are allowed inside both roots. Creating `knowledge/` directories ANYWHERE else in the project tree is FORBIDDEN.
+
+1. **Choose a path** within the chosen root: `{domain}/{subdomain}/{filename}.md`
    - Follow existing structure if the domain already has entries
-   - Create new directories as needed
+   - Create new subdirectories as needed (only INSIDE the root)
 
 2. **Write the entry** with mandatory source link (the `board` tool's `distill` action):
    ```
-   board action=distill path=<knowledge-path> content="<full entry markdown>" source="topic-<id>#seq-<N>,seq-<M>" description="<one-line for index>"
+   board action=distill path=<entry-path> content="<full entry markdown>" source="topic-<id>#seq-<N>,seq-<M>" description="<one-line for index>" scope=project|global
    ```
    Entries without a `source` are rejected by the runtime.
 
-3. **Check for conflicts**: If the new finding contradicts an existing entry in `knowledge/`:
+3. **Check for conflicts**: If the new finding contradicts an existing entry in the SAME root:
    - DO NOT modify or overwrite the existing entry
    - Instead, mark it as CONFLICT (the `board` tool's `distill-conflict` action — it only appends a CONFLICT block, never rewrites):
    ```
-   board action=distill-conflict path=<existing-path> source="topic-<id>#seq-<N>" description="<what contradicts>"
+   board action=distill-conflict path=<existing-path> source="topic-<id>#seq-<N>" description="<what contradicts>" scope=project|global
    ```
    - Then add the new finding as a separate entry (`action=distill` with a different path)
 
 ### Step 4: Update Index
 
-The `distill` action automatically updates `knowledge/index.md`. Verify the index after completion.
+The `distill` action automatically updates `index.md` in the chosen root. Verify the index after completion.
 
 ## Rules (MUST)
 
 1. **溯源 (Traceability) is mandatory**: Every entry MUST include `来源: topic-<id>#seq-<N>` linking back to the original evidence. Entries without source links are REJECTED.
 
-2. **NEVER silently overwrite**: When new knowledge contradicts existing entries, ALWAYS mark the conflict explicitly. Use the CONFLICT workflow above.
+2. **Fixed placement (ADR-0011)**: Project knowledge lives ONLY at `<project-root>/knowledge/`; cross-project knowledge ONLY at `~/.pi-harness/knowledge/`; handoffs ONLY at `<project-root>/handoff/`. Internal subfolders are fine — any other location is forbidden.
 
-3. **Quality over quantity**: It's better to distill 2 high-quality entries than 10 vague ones. Discard anything that doesn't meet the "reusable + specific + evidenced" bar.
+3. **NEVER silently overwrite**: When new knowledge contradicts existing entries, ALWAYS mark the conflict explicitly. Use the CONFLICT workflow above.
 
-4. **Preserve original wording**: Don't over-summarize. The entry should be detailed enough to be useful without re-reading the original topic.
+4. **Quality over quantity**: It's better to distill 2 high-quality entries than 10 vague ones. Discard anything that doesn't meet the "reusable + specific + evidenced" bar.
+
+5. **Preserve original wording**: Don't over-summarize. The entry should be detailed enough to be useful without re-reading the original topic.
 
 ## Example
 
@@ -72,7 +79,7 @@ Topic `ghidra-crash-investigation` closed with findings:
 - seq #12 (human critical): "Focus on ARM, ignore x86 for now"
 
 Distill decision:
-- ✅ Distill seq #3 + #7 → `knowledge/reverse-engineering/ghidra/arm-thumb-xor-misalignment.md`
+- ✅ Distill seq #3 + #7 → `reverse-engineering/ghidra/arm-thumb-xor-misalignment.md` with scope=global (cross-project tool limitation)
 - ❌ Discard seq #12 (project-specific direction, not reusable knowledge)
 
 Result in knowledge:

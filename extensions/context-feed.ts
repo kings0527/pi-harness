@@ -38,21 +38,29 @@ function resolveDigestStrategy(): DigestStrategy {
   return "auto";
 }
 
+function readIndexFile(indexPath: string): string {
+  if (!existsSync(indexPath)) return "";
+  return readFileSync(indexPath, "utf-8").trim();
+}
+
+// ADR-0011: two fixed tiers — project (<cwd>/knowledge/) + global (~/.pi-harness/knowledge/).
 function getKnowledgeIndex(): string {
   // Check cache freshness
   if (knowledgeIndexCache && Date.now() - knowledgeIndexCache.fetchedAt < KNOWLEDGE_CACHE_TTL) {
     return knowledgeIndexCache.content;
   }
 
-  // Knowledge index is at global path: ~/.pi-harness/knowledge/index.md
-  const indexPath = join(homedir(), ".pi-harness", "knowledge", "index.md");
-
-  if (!existsSync(indexPath)) {
-    knowledgeIndexCache = { content: "", fetchedAt: Date.now() };
-    return "";
+  const sections: string[] = [];
+  const projectIndex = readIndexFile(join(process.cwd(), "knowledge", "index.md"));
+  if (projectIndex) {
+    sections.push(`Project knowledge index (<project-root>/knowledge/):\n${projectIndex}`);
+  }
+  const globalIndex = readIndexFile(join(homedir(), ".pi-harness", "knowledge", "index.md"));
+  if (globalIndex) {
+    sections.push(`Global knowledge index (~/.pi-harness/knowledge/):\n${globalIndex}`);
   }
 
-  const content = readFileSync(indexPath, "utf-8").trim();
+  const content = sections.join("\n\n");
   knowledgeIndexCache = { content, fetchedAt: Date.now() };
   return content;
 }
