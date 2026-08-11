@@ -1,13 +1,13 @@
 import { Type } from "typebox";
 // 注意：extension 中引用 core/ 时使用相对路径
 import { openTopic, postNote, readNotes, listTopics, closeTopic } from "../core/board/index.ts";
-import { addEntry, markConflict } from "../core/knowledge/index.ts";
+import { addEntry, markConflict, type KnowledgeScope } from "../core/knowledge/index.ts";
 
 export default async function(pi: any) {
   pi.registerTool({
     name: "board",
     label: "Shared Blackboard",
-    description: "Topic-based shared blackboard for multi-agent collaboration. Actions: open <topic> --goal, post <topic> <content>, read <topic> [--since seq], list, close <topic>, distill (elevate a closed-topic conclusion into knowledge/, params: path/content/source/description), distill-conflict (mark an existing knowledge entry as contradicted, params: path/source/description). Use proactively when investigating multi-angle problems — no user instruction needed.",
+    description: "Topic-based shared blackboard for multi-agent collaboration. Actions: open <topic> --goal, post <topic> <content>, read <topic> [--since seq], list, close <topic>, distill (elevate a closed-topic conclusion into knowledge, params: path/content/source/description, scope=project(default)|global), distill-conflict (mark an existing knowledge entry as contradicted, params: path/source/description, scope). Knowledge lives ONLY at <project-root>/knowledge/ (project) or ~/.pi-harness/knowledge/ (global) — nowhere else. Use proactively when investigating multi-angle problems — no user instruction needed.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("open"),
@@ -25,7 +25,8 @@ export default async function(pi: any) {
       since: Type.Optional(Type.Integer({ description: "Seq number for incremental read" })),
       tags: Type.Optional(Type.Array(Type.String(), { description: "Tags for the note" })),
       priority: Type.Optional(Type.Union([Type.Literal("normal"), Type.Literal("critical")], { description: "Note priority" })),
-      path: Type.Optional(Type.String({ description: "Knowledge entry path relative to knowledge/ (for distill: new entry; for distill-conflict: existing entry)" })),
+      path: Type.Optional(Type.String({ description: "Knowledge entry path relative to the knowledge root (for distill: new entry; for distill-conflict: existing entry). Internal subdirectories allowed." })),
+      scope: Type.Optional(Type.Union([Type.Literal("project"), Type.Literal("global")], { description: "Knowledge tier: project=<project-root>/knowledge/ (default, travels with repo) | global=~/.pi-harness/knowledge/ (cross-project)" })),
       source: Type.Optional(Type.String({ description: "Traceability link, e.g. topic-<id>#seq-<N> (mandatory for distill; new evidence source for distill-conflict)" })),
       description: Type.Optional(Type.String({ description: "One-line description (for distill: index.md line; for distill-conflict: what contradicts)" })),
     }),
@@ -76,16 +77,18 @@ export default async function(pi: any) {
             if (!params.content) throw new Error("content is required for distill");
             if (!params.description) throw new Error("description is required for distill");
             // 溯源校验（无溯源即拒绝）由 addEntry 单点持有，这里原样透传
-            addEntry(params.path, params.content, params.source ?? "", params.description);
-            return { content: [{ type: "text" as const, text: `Distilled entry "${params.path}" (source: ${params.source}). knowledge/index.md updated.` }] };
+            const scope: KnowledgeScope = params.scope === "global" ? "global" : "project";
+            addEntry(params.path, params.content, params.source ?? "", params.description, scope);
+            return { content: [{ type: "text" as const, text: `Distilled entry "${params.path}" (${scope}, source: ${params.source}). knowledge/index.md updated.` }] };
           }
           case "distill-conflict": {
             if (!params.path) throw new Error("path is required for distill-conflict");
             if (!params.source) throw new Error("source is required for distill-conflict");
             if (!params.description) throw new Error("description is required for distill-conflict");
             // CONFLICT 只追加不覆盖，由 markConflict 保证
-            markConflict(params.path, params.source, params.description);
-            return { content: [{ type: "text" as const, text: `Marked CONFLICT on "${params.path}" (new evidence: ${params.source}). Original content preserved.` }] };
+            const conflictScope: KnowledgeScope = params.scope === "global" ? "global" : "project";
+            markConflict(params.path, params.source, params.description, conflictScope);
+            return { content: [{ type: "text" as const, text: `Marked CONFLICT on "${params.path}" (${conflictScope}, new evidence: ${params.source}). Original content preserved.` }] };
           }
           default:
             throw new Error(`Unknown action: ${params.action}`);

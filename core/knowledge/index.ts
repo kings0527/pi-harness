@@ -8,26 +8,29 @@ export interface IndexEntry {
   description: string;
 }
 
-// Knowledge root is global: ~/.pi-harness/knowledge/
-// Knowledge is a cross-project cognitive asset, not project-local.
-function getKnowledgeRoot(): string {
-  const root = join(homedir(), ".pi-harness", "knowledge");
-  if (!existsSync(root)) {
-    mkdirSync(root, { recursive: true });
-  }
-  return root;
+// ADR-0011: two fixed knowledge tiers, nowhere else.
+// - "project": <cwd>/knowledge/        — project-level knowledge, travels with the repo
+// - "global":  ~/.pi-harness/knowledge/ — cross-project reusable asset
+// Internal subdirectories are allowed inside both roots; creating knowledge
+// directories at any other location in the project tree is forbidden.
+export type KnowledgeScope = "project" | "global";
+
+export function getKnowledgeRoot(scope: KnowledgeScope = "project"): string {
+  return scope === "global"
+    ? join(homedir(), ".pi-harness", "knowledge")
+    : join(process.cwd(), "knowledge");
 }
 
-function getIndexPath(): string {
-  return join(getKnowledgeRoot(), "index.md");
+function getIndexPath(scope: KnowledgeScope): string {
+  return join(getKnowledgeRoot(scope), "index.md");
 }
 
 /**
  * Parse knowledge/index.md and return entries
  * Format: each line is "path | description" (ignoring comments and headers)
  */
-export function getIndex(): IndexEntry[] {
-  const indexPath = getIndexPath();
+export function getIndex(scope: KnowledgeScope = "project"): IndexEntry[] {
+  const indexPath = getIndexPath(scope);
   if (!existsSync(indexPath)) return [];
 
   const content = readFileSync(indexPath, "utf-8");
@@ -56,24 +59,26 @@ export function getIndex(): IndexEntry[] {
 /**
  * Read a specific knowledge entry file
  */
-export function getEntry(entryPath: string): string | null {
-  const fullPath = join(getKnowledgeRoot(), entryPath);
+export function getEntry(entryPath: string, scope: KnowledgeScope = "project"): string | null {
+  const fullPath = join(getKnowledgeRoot(scope), entryPath);
   if (!existsSync(fullPath)) return null;
   return readFileSync(fullPath, "utf-8");
 }
 
 /**
  * Add a new knowledge entry with mandatory source link
- * @param entryPath - relative path within knowledge/ (e.g., "reverse-engineering/ghidra/known-limitations.md")
+ * @param entryPath - relative path within the knowledge root (e.g., "reverse-engineering/ghidra/known-limitations.md")
  * @param content - markdown content
  * @param sourceLink - traceability link (e.g., "topic-investigation#seq-12")
  * @param description - one-line description for index.md
+ * @param scope - "project" (default, <project-root>/knowledge/) or "global" (~/.pi-harness/knowledge/)
  */
 export function addEntry(
   entryPath: string,
   content: string,
   sourceLink: string,
-  description: string
+  description: string,
+  scope: KnowledgeScope = "project"
 ): void {
   // Validate: source link is mandatory
   if (!sourceLink || sourceLink.trim() === "") {
@@ -81,15 +86,15 @@ export function addEntry(
   }
 
   // Check for conflicts with existing entries
-  const existing = getEntry(entryPath);
+  const existing = getEntry(entryPath, scope);
   if (existing) {
     throw new Error(
       `Entry "${entryPath}" already exists. Use markConflict() if the new finding contradicts it, or choose a different path.`
     );
   }
 
-  // Ensure directory exists
-  const fullPath = join(getKnowledgeRoot(), entryPath);
+  // Ensure directory exists (write path is the ONLY place dirs are created)
+  const fullPath = join(getKnowledgeRoot(scope), entryPath);
   const dir = dirname(fullPath);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -100,13 +105,14 @@ export function addEntry(
   writeFileSync(fullPath, entryContent, "utf-8");
 
   // Update index.md
-  updateIndex(entryPath, description);
+  updateIndex(entryPath, description, scope);
 
   // Log event
   appendEvent("distill", {
     action: "add_entry",
     path: entryPath,
     source: sourceLink,
+    scope,
   });
 }
 
@@ -117,9 +123,10 @@ export function addEntry(
 export function markConflict(
   existingPath: string,
   newSourceLink: string,
-  conflictDescription: string
+  conflictDescription: string,
+  scope: KnowledgeScope = "project"
 ): void {
-  const fullPath = join(getKnowledgeRoot(), existingPath);
+  const fullPath = join(getKnowledgeRoot(scope), existingPath);
   if (!existsSync(fullPath)) {
     throw new Error(`Entry "${existingPath}" not found — cannot mark conflict`);
   }
@@ -139,14 +146,15 @@ export function markConflict(
     action: "mark_conflict",
     path: existingPath,
     newSource: newSourceLink,
+    scope,
   });
 }
 
 /**
  * Update index.md with a new or modified entry
  */
-function updateIndex(entryPath: string, description: string): void {
-  const indexPath = getIndexPath();
+function updateIndex(entryPath: string, description: string, scope: KnowledgeScope): void {
+  const indexPath = getIndexPath(scope);
   let content = "";
 
   if (existsSync(indexPath)) {
