@@ -7,9 +7,11 @@ import type { Note } from "../board/types.ts";
 import {
   auditIndex,
   getKnowledgeRoot,
+  getWorkspaceRoot,
   type KnowledgeIndexIssue,
   type KnowledgeScope,
 } from "../knowledge/index.ts";
+import { extractRootSections } from "../knowledge/scope.ts";
 
 export interface KnowledgeSnapshot {
   content: string;
@@ -54,8 +56,8 @@ function readIndexFile(indexPath: string): string {
   return readFileSync(indexPath, "utf-8").trim();
 }
 
-/** Read each distinct project/workspace/global index exactly once. */
-export function buildKnowledgeSnapshot(): KnowledgeSnapshot {
+/** Read each distinct project/workspace/global index exactly once, then append per-directory KNOWLEDGE.md scopes. */
+export function buildKnowledgeSnapshot(activeScopes?: string[]): KnowledgeSnapshot {
   const sections: string[] = [];
   const issues: KnowledgeSnapshot["issues"] = [];
   const roots: Array<{ root: string; scopes: KnowledgeScope[] }> = [];
@@ -80,6 +82,39 @@ export function buildKnowledgeSnapshot(): KnowledgeSnapshot {
         scope,
         issue: { path: "index.md", reason: "invalid", detail: error?.message },
       });
+    }
+  }
+
+  // Per-directory KNOWLEDGE.md: root workspace-level rules
+  const workspaceRoot = getWorkspaceRoot();
+  const rootKnowledge = join(workspaceRoot, "KNOWLEDGE.md");
+  if (existsSync(rootKnowledge)) {
+    const rootContent = readFileSync(rootKnowledge, "utf-8").trim();
+    if (rootContent) {
+      const { always, areas, rest } = extractRootSections(rootContent);
+      if (always) sections.push(`workspace-rules:\n${always}`);
+      if (areas) sections.push(`workspace-areas:\n${areas}`);
+      if (rest) sections.push(`workspace-knowledge:\n${rest}`);
+    }
+  }
+
+  // Per-directory KNOWLEDGE.md: active scopes from last turn's file access
+  if (activeScopes && activeScopes.length > 0) {
+    for (const scopeDir of activeScopes) {
+      const knowledgePath = join(scopeDir, "KNOWLEDGE.md");
+      if (existsSync(knowledgePath)) {
+        try {
+          const scopeContent = readFileSync(knowledgePath, "utf-8").trim();
+          if (scopeContent) {
+            const relative = scopeDir.startsWith(workspaceRoot + "/")
+              ? scopeDir.slice(workspaceRoot.length + 1)
+              : scopeDir;
+            sections.push(`scope(${relative}):\n${scopeContent}`);
+          }
+        } catch {
+          // Skip unreadable scope files.
+        }
+      }
     }
   }
 

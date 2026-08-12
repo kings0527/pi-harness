@@ -12,13 +12,19 @@ import {
 import { assessContextSize } from "../core/context-size/index.ts";
 import { writeContextSnapshot } from "../core/context-snapshot/index.ts";
 import { appendEvent } from "../core/events/index.ts";
+import { discoverScopes, findKnowledgeScope, type ScopeEntry } from "../core/knowledge/scope.ts";
 
 const REFERENCE_MESSAGE_TYPE = "pi-harness-reference";
 const CRITICAL_MESSAGE_TYPE = "pi-harness-board-critical";
 const participatingTopics = new Set<string>();
 const announcedCriticalNotes = new Set<string>();
+const activeKnowledgeScopes = new Set<string>();
+let scopeCache: Map<string, ScopeEntry> = new Map();
 let lastSizeWarningKey: string | null = null;
 let lastHealthWarningKey: string | null = null;
+
+const SCOPE_ACTIVATING_TOOLS = new Set(["read", "read_file", "edit", "write", "edit_file", "write_file"]);
+const SCOPE_IGNORE_BASENAMES = new Set(["package.json", "package-lock.json", "tsconfig.json", ".gitignore", "README.md", "KNOWLEDGE.md", "LICENSE"]);
 
 interface FrozenReference {
   id: string;
@@ -182,10 +188,16 @@ export default async function (pi: any) {
   pi.on("session_start", async (_event: any, ctx: any) => {
     participatingTopics.clear();
     announcedCriticalNotes.clear();
+    activeKnowledgeScopes.clear();
     frozenReference = null;
     lastSizeWarningKey = null;
     lastHealthWarningKey = null;
     restoreAnnouncedCriticalNotes(ctx);
+    try {
+      scopeCache = discoverScopes(process.cwd(), 8);
+    } catch {
+      scopeCache = new Map();
+    }
     try {
       for (const topic of listTopics()) {
         if (topic.status === "open") participatingTopics.add(topic.id);
@@ -204,12 +216,26 @@ export default async function (pi: any) {
     }
   });
 
+  pi.on("tool_call", async (event: any) => {
+    const toolName = (event.tool || event.toolName || "").toLowerCase();
+    if (!SCOPE_ACTIVATING_TOOLS.has(toolName)) return;
+    const input = event.input || event.args || {};
+    const filePath: string | undefined = input.file_path || input.path;
+    if (!filePath) return;
+    const basename = filePath.split("/").pop() || "";
+    if (SCOPE_IGNORE_BASENAMES.has(basename)) return;
+    if (filePath.includes("node_modules/") || filePath.includes(".git/")) return;
+
+    const scopeDir = findKnowledgeScope(filePath, process.cwd());
+    if (scopeDir) activeKnowledgeScopes.add(scopeDir);
+  });
+
   pi.on("message_end", async (event: any) => {
     rememberCriticalMessage(event.message);
   });
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
-    const knowledge = buildKnowledgeSnapshot();
+    const knowledge = buildKnowledgeSnapshot([...activeKnowledgeScopes]);
     const board = buildBoardSnapshot(participatingTopics);
     emitHealthWarning(knowledge.issues);
 
