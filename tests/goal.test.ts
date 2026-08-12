@@ -1,20 +1,20 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// goal 的存储根锚定 process.cwd()/.pi-board（core/storage 惰性初始化），
-// 因此在动态 import 前 chdir 到临时目录即可完全隔离，不污染仓库。
 let workDir: string;
 let originalCwd: string;
 let goal: typeof import("../core/goal/index.ts");
+let board: typeof import("../core/board/index.ts");
 
 before(async () => {
   originalCwd = process.cwd();
-  workDir = mkdtempSync(join(tmpdir(), "pi-harness-goal-test-"));
+  workDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-harness-goal-test-")));
   process.chdir(workDir);
   goal = await import("../core/goal/index.ts");
+  board = await import("../core/board/index.ts");
 });
 
 after(() => {
@@ -22,76 +22,98 @@ after(() => {
   rmSync(workDir, { recursive: true, force: true });
 });
 
-test("setGoal / getGoal — 创建并读取", () => {
-  const state = goal.setGoal("complete all tests");
-  assert.equal(state.text, "complete all tests");
-  assert.equal(state.status, "active");
-  assert.equal(state.turnCount, 0);
-  assert.ok(state.createdAt > 0);
+test("goal state is isolated by pi session id", () => {
+  const first = goal.setGoal("session-a", "complete A");
+  const second = goal.setGoal("session-b", "complete B");
 
-  const read = goal.getGoal();
-  assert.ok(read);
-  assert.equal(read!.text, "complete all tests");
-  assert.equal(read!.status, "active");
+  assert.notEqual(first.id, second.id);
+  assert.equal(goal.getGoal("session-a")?.text, "complete A");
+  assert.equal(goal.getGoal("session-b")?.text, "complete B");
+  assert.equal(first.sessionId, "session-a");
+  assert.equal(first.userTurnCount, 0);
+  assert.ok(existsSync(goal.getGoalFilePath("session-a")));
+  assert.ok(existsSync(goal.getGoalFilePath("session-b")));
 });
 
-test("updateGoal — 部分更新保留其余字段", () => {
-  goal.setGoal("partial update test");
-  const updated = goal.updateGoal({ turnCount: 5 });
-  assert.ok(updated);
-  assert.equal(updated!.text, "partial update test");
-  assert.equal(updated!.turnCount, 5);
-  assert.equal(updated!.status, "active");
-  assert.ok(updated!.updatedAt >= updated!.createdAt);
+test("session ids cannot escape .pi-board/goals or collide after sanitization", () => {
+  goal.setGoal("../../session", "traversal-safe");
+  goal.setGoal(".._.._session", "collision-safe");
+
+  const traversalPath = goal.getGoalFilePath("../../session");
+  const collisionPath = goal.getGoalFilePath(".._.._session");
+  const goalsRoot = join(workDir, ".pi-board", "goals");
+  assert.ok(traversalPath.startsWith(goalsRoot + "/"));
+  assert.ok(collisionPath.startsWith(goalsRoot + "/"));
+  assert.notEqual(traversalPath, collisionPath);
+  assert.equal(goal.getGoal("../../session")?.text, "traversal-safe");
+  assert.equal(goal.getGoal(".._.._session")?.text, "collision-safe");
 });
 
-test("clearGoal — 清除后 getGoal 返回 null", () => {
-  goal.setGoal("to be cleared");
-  assert.ok(goal.getGoal());
-  goal.clearGoal();
-  assert.equal(goal.getGoal(), null);
+test("domain transitions preserve state and count user turns only", () => {
+  const created = goal.setGoal("session-transitions", "state transitions");
+  assert.equal(goal.pauseGoal("session-transitions")?.status, "paused");
+  assert.equal(goal.beginGoalTurn("session-transitions", created.id), null, "paused goals do not advance");
+  assert.equal(goal.resumeGoal("session-transitions")?.status, "active");
+
+  const advanced = goal.beginGoalTurn("session-transitions", created.id);
+  assert.equal(advanced?.userTurnCount, 1);
+  assert.equal(goal.beginGoalTurn("session-transitions", "wrong-goal-id"), null);
+  assert.equal(goal.getGoal("session-transitions")?.userTurnCount, 1);
 });
 
-test("文件格式 — .pi-board/goal.json 存在且可 JSON.parse", () => {
-  goal.setGoal("file format test");
-  const filePath = join(workDir, ".pi-board", "goal.json");
-  assert.ok(existsSync(filePath));
-  const content = readFileSync(filePath, "utf-8");
-  const parsed = JSON.parse(content);
-  assert.equal(parsed.text, "file format test");
-  assert.equal(parsed.status, "active");
+test("completion requires the exact persisted Board note and current goal id", () => {
+  const state = goal.setGoal("session-complete", "verified completion");
+  board.openTopic("goal-completion", "Collect completion evidence");
+
+  const unbound = board.postNote("goal-completion", "agent", "Evidence without goal binding", {
+    tags: [goal.GOAL_MET_TAG],
+  });
+  assert.equal(
+    goal.completeGoalFromBoardNote("session-complete", state.id, "goal-completion", unbound.seq),
+    null,
+  );
+  assert.equal(goal.getGoal("session-complete")?.status, "active");
+
+  const bound = board.postNote("goal-completion", "agent", "Tests and output verify completion", {
+    tags: [goal.GOAL_MET_TAG, goal.goalEvidenceTag(state.id)],
+  });
+  const completed = goal.completeGoalFromBoardNote(
+    "session-complete",
+    state.id,
+    "goal-completion",
+    bound.seq,
+  );
+  assert.equal(completed?.status, "achieved");
+  assert.equal(completed?.evidence?.topic, "goal-completion");
+  assert.equal(completed?.evidence?.noteSeq, bound.seq);
 });
 
-test("单一活跃 — setGoal 两次，第二次覆盖第一次", () => {
-  goal.setGoal("first goal");
-  goal.setGoal("second goal");
-  const current = goal.getGoal();
-  assert.ok(current);
-  assert.equal(current!.text, "second goal");
+test("goal reference snapshots are content-addressed and preserve exact bytes", () => {
+  const created = goal.setGoal("session-snapshot", "verify <goal> & evidence");
+  const active = goal.beginGoalTurn("session-snapshot", created.id)!;
+  const first = goal.createGoalReferenceSnapshot(active);
+  const second = goal.createGoalReferenceSnapshot(active);
+
+  assert.equal(first.id, second.id);
+  assert.equal(first.content, second.content);
+  assert.equal(readFileSync(first.path, "utf-8"), first.content);
+  assert.match(first.content, /user_turn="1"/);
+  assert.match(first.content, /verify &lt;goal&gt; &amp; evidence/);
+  assert.match(first.content, new RegExp(goal.goalEvidenceTag(active.id)));
 });
 
-test("状态流转 — active → paused → active → achieved", () => {
-  goal.setGoal("state transitions");
+test("clearGoal removes only the selected session goal", () => {
+  goal.setGoal("session-clear-a", "clear me");
+  goal.setGoal("session-clear-b", "keep me");
+  const cleared = goal.clearGoal("session-clear-a");
 
-  let state = goal.getGoal();
-  assert.equal(state!.status, "active");
-
-  goal.updateGoal({ status: "paused" });
-  state = goal.getGoal();
-  assert.equal(state!.status, "paused");
-
-  goal.updateGoal({ status: "active" });
-  state = goal.getGoal();
-  assert.equal(state!.status, "active");
-
-  goal.updateGoal({ status: "achieved", achievedAt: Date.now() });
-  state = goal.getGoal();
-  assert.equal(state!.status, "achieved");
-  assert.ok(state!.achievedAt! > 0);
+  assert.equal(cleared?.text, "clear me");
+  assert.equal(goal.getGoal("session-clear-a"), null);
+  assert.equal(goal.getGoal("session-clear-b")?.text, "keep me");
 });
 
-test("Architecture invariant — core/goal/index.ts 中无 @earendil import", () => {
+test("goal core remains runtime-agnostic", () => {
   const sourcePath = join(originalCwd, "core", "goal", "index.ts");
   const source = readFileSync(sourcePath, "utf-8");
-  assert.ok(!source.includes("@earendil"), "core/goal must not import @earendil packages");
+  assert.ok(!source.includes("@earendil"), "core/goal must not import pi packages");
 });

@@ -26,12 +26,13 @@ test("完整常驻 prompt + doctrine inline + tool descriptions 保持在保守�
   assert.ok(estimateContextTokens(corpus) <= 900, "keep headroom below the 1000-token invariant");
 });
 
-test("ADR-0011/0012/0013/0014 遵守十行格式", () => {
+test("ADR-0011 through ADR-0015 遵守十行格式", () => {
   for (const path of [
     "docs/decisions/0011-fixed-knowledge-handoff-placement.md",
     "docs/decisions/0012-preserve-context-warn-on-size.md",
     "docs/decisions/0013-frozen-auditable-context-injection.md",
     "docs/decisions/0014-hierarchical-knowledge-scopes.md",
+    "docs/decisions/0015-persistent-goal.md",
   ]) {
     assert.ok(read(path).trimEnd().split("\n").length <= 10, `${path} exceeds 10 lines`);
   }
@@ -43,4 +44,11 @@ test("项目 knowledge 可被 Git 跟踪，完整内容路径无固定截断", (
   assert.doesNotMatch(read("extensions/context-feed.ts"), /maxBytes|totalBudget|3000 -/);
   assert.doesNotMatch(read("core/spawn/index.ts"), /OUTPUT_TAIL|output\.slice/);
   assert.doesNotMatch(read("core/board/digest.ts"), /notes omitted|maxBytes/);
+});
+
+test("goal lifecycle freezes per user turn and verifies completion after execution", () => {
+  const source = read("extensions/goal.ts");
+  assert.match(source, /pi\.on\("before_agent_start"/);
+  assert.match(source, /pi\.on\("tool_result"/);
+  assert.doesNotMatch(source, /pi\.on\("tool_call"|STALL_THRESHOLD|pi\.sendMessage/);
 });

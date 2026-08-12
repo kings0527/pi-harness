@@ -50,7 +50,10 @@ export default async function(pi: any) {
             const author = params.author || "agent";
             const priority = params.priority === "critical" ? "critical" as const : undefined;
             const note = postNote(params.topic, author, params.content, { tags: params.tags, priority });
-            return { content: [{ type: "text" as const, text: `Posted note #${note.seq} to "${params.topic}" by ${author}` }] };
+            return {
+              content: [{ type: "text" as const, text: `Posted note #${note.seq} to "${params.topic}" by ${author}` }],
+              details: { action: "post", topic: params.topic, noteSeq: note.seq },
+            };
           }
           case "read": {
             if (!params.topic) throw new Error("topic is required for read");
