@@ -129,6 +129,16 @@ export default async function goalExtension(pi: ExtensionAPI) {
         ctx,
         `Goal set: ${goal.text}\nCompletion tags: ${GOAL_MET_TAG}, ${goalEvidenceTag(goal.id)}`,
       );
+
+      // Slash commands are consumed by Pi and otherwise vanish from the
+      // transcript. Re-submit the exact visible command as a real user message;
+      // Pi skips command expansion for extension-originated user messages, fires
+      // before_agent_start, persists the turn, and starts execution immediately.
+      if (!ctx.isIdle()) await ctx.waitForIdle();
+      const latest = getGoal(id);
+      if (latest?.id === goal.id && latest.status === "active") {
+        pi.sendUserMessage(`/goal ${trimmed}`);
+      }
     },
     getArgumentCompletions(prefix) {
       return ["status", "pause", "resume", "off"]

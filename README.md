@@ -23,6 +23,7 @@ pi install github:kings0527/pi-harness         # 从 GitHub
 - **Agent 自主判断**何时启动多 agent 协作（≥2 个可并行方向、探索面大、需独立验证时），无需用户手动指示。
 - **迭代收敛循环**：spawn → 读板 → 不够就针对缺口再 spawn → 收敛才 close。
 - **Close 门禁**：runtime 强制 `close` 前必须先在板上贴出带 `convergence` tag 的收敛判词，否则阻断（收敛判断归 LLM，存在性校验归代码）。
+- **持久执行目标**：`/goal <objective>` 按 session 保存目标、在 transcript 保留原命令并立即启动执行；`status/pause/resume/off` 只管理状态。
 
 ### 知识层：Knowledge + Distill
 

@@ -12,11 +12,13 @@ let boardTool: any;
 let entries: Array<{ type: string; data: any }>;
 let notifications: Array<{ sessionId: string; message: string; level: string }>;
 let contextEntries: Map<string, any[]>;
+let sentUserMessages: Array<{ content: string; options: any }>;
 let goal: typeof import("../core/goal/index.ts");
 let board: typeof import("../core/board/index.ts");
 
-function runtimeContext(sessionId: string, contextWindow = 1_000_000): any {
+function runtimeContext(sessionId: string, contextWindow = 1_000_000, idle = true): any {
   const activeEntries = contextEntries.get(sessionId) ?? [];
+  let idleState = idle;
   return {
     sessionManager: {
       getSessionId: () => sessionId,
@@ -25,6 +27,10 @@ function runtimeContext(sessionId: string, contextWindow = 1_000_000): any {
     },
     model: { id: "test-model", contextWindow },
     getContextUsage: () => ({ tokens: 0, contextWindow, percent: 0 }),
+    isIdle: () => idleState,
+    async waitForIdle() {
+      idleState = true;
+    },
     ui: {
       notify(message: string, level: string) {
         notifications.push({ sessionId, message, level });
@@ -73,6 +79,7 @@ before(async () => {
   entries = [];
   notifications = [];
   contextEntries = new Map();
+  sentUserMessages = [];
 
   const fakePi = {
     on(name: string, handler: (event: any, ctx: any) => any) {
@@ -87,6 +94,9 @@ before(async () => {
     appendEntry(type: string, data: any) {
       entries.push({ type, data });
     },
+    sendUserMessage(content: string, options?: any) {
+      sentUserMessages.push({ content, options });
+    },
   };
 
   const goalExtension = (await import(`../extensions/goal.ts?test=${Date.now()}`)).default;
@@ -100,6 +110,7 @@ before(async () => {
 beforeEach(() => {
   entries.length = 0;
   notifications.length = 0;
+  sentUserMessages.length = 0;
 });
 
 after(() => {
@@ -114,6 +125,22 @@ test("slash command stores independent goals for independent pi sessions", async
   assert.equal(goal.getGoal("extension-session-a")?.text, "goal A");
   assert.equal(goal.getGoal("extension-session-b")?.text, "goal B");
   assert.equal(notifications.length, 2);
+});
+
+test("/goal <objective> persists the visible command and starts execution immediately", async () => {
+  const sessionId = "extension-immediate-start";
+  await goalCommand.handler("execute this objective", runtimeContext(sessionId));
+
+  assert.equal(goal.getGoal(sessionId)?.text, "execute this objective");
+  assert.deepEqual(sentUserMessages, [{ content: "/goal execute this objective", options: undefined }]);
+});
+
+test("/goal waits for an active run to settle before starting the replacement objective", async () => {
+  const sessionId = "extension-deferred-start";
+  const ctx = runtimeContext(sessionId, 1_000_000, false);
+  await goalCommand.handler("replacement objective", ctx);
+
+  assert.deepEqual(sentUserMessages, [{ content: "/goal replacement objective", options: undefined }]);
 });
 
 test("active goal is appended once and leaves the next user turn cache-prefix append-only", async () => {
@@ -262,5 +289,6 @@ test("goal status uses operator UI and does not inject persistent status message
   assert.equal(goal.getGoal(sessionId), null);
   assert.ok(notifications.some(item => item.message.includes("Goal paused")));
   assert.ok(notifications.some(item => item.message.includes("Goal resumed")));
+  assert.equal(sentUserMessages.length, 1, "only /goal <objective> starts an agent turn");
   assert.equal((handlers.context ?? []).length, 1, "context hook is legacy-status cleanup only");
 });
