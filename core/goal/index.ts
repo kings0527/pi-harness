@@ -210,6 +210,7 @@ export function renderGoalReference(goal: GoalState): string {
   return [
     `<active_goal id="${escapeXml(goal.id)}" scope="current-session">`,
     "<instruction>This is the persistent execution target for the current session. Every action should serve it.</instruction>",
+    "<execution_policy>Work autonomously within the stated goal and existing permissions until achieved. When several viable routes exist, choose the best evidence-backed, reversible route and execute it; do not stop to ask the user to pick or merely offer next steps. Request user input only when every meaningful route is blocked by essential information or permission that cannot be inferred or obtained. Otherwise state assumptions and keep working.</execution_policy>",
     `<objective>${escapeXml(goal.text)}</objective>`,
     `<completion required_tags="${GOAL_MET_TAG} ${escapeXml(evidenceTag)}">When fully achieved, post a Board note containing completion evidence with both required tags.</completion>`,
     "</active_goal>",

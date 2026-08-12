@@ -104,6 +104,16 @@ test("goal reference snapshots are content-addressed and preserve exact bytes", 
   assert.equal(second.userTurnCount, 2, "turn accounting stays in metadata, outside prompt bytes");
 });
 
+test("active goal makes route selection autonomous unless every path is truly blocked", () => {
+  const state = goal.setGoal("session-autonomous", "finish without delegating routine choices");
+  const reference = goal.renderGoalReference(state);
+
+  assert.match(reference, /choose the best evidence-backed, reversible route and execute it/i);
+  assert.match(reference, /do not stop to ask the user to pick/i);
+  assert.match(reference, /only when every meaningful route is blocked/i);
+  assert.match(reference, /otherwise state assumptions and keep working/i);
+});
+
 test("clearGoal removes only the selected session goal", () => {
   goal.setGoal("session-clear-a", "clear me");
   goal.setGoal("session-clear-b", "keep me");
