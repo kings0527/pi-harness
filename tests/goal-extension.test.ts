@@ -11,12 +11,18 @@ let goalCommand: any;
 let boardTool: any;
 let entries: Array<{ type: string; data: any }>;
 let notifications: Array<{ sessionId: string; message: string; level: string }>;
+let contextEntries: Map<string, any[]>;
 let goal: typeof import("../core/goal/index.ts");
 let board: typeof import("../core/board/index.ts");
 
 function runtimeContext(sessionId: string, contextWindow = 1_000_000): any {
+  const activeEntries = contextEntries.get(sessionId) ?? [];
   return {
-    sessionManager: { getSessionId: () => sessionId },
+    sessionManager: {
+      getSessionId: () => sessionId,
+      buildContextEntries: () => activeEntries,
+      getBranch: () => activeEntries,
+    },
     model: { id: "test-model", contextWindow },
     getContextUsage: () => ({ tokens: 0, contextWindow, percent: 0 }),
     ui: {
@@ -34,7 +40,29 @@ async function fire(name: string, event: any, ctx: any): Promise<any[]> {
 }
 
 function goalMessage(result: any): any {
-  return result.messages.find((message: any) => message.customType === "pi-harness-goal");
+  return result
+    .flatMap((item: any) => item?.message ? [item.message] : [])
+    .find((message: any) => message.customType === "pi-harness-goal");
+}
+
+async function startTurn(sessionId: string, prompt: string): Promise<any[]> {
+  const ctx = runtimeContext(sessionId);
+  const results = await fire("before_agent_start", { prompt }, ctx);
+  const activeEntries = contextEntries.get(sessionId) ?? [];
+  activeEntries.push({
+    type: "message",
+    message: { role: "user", content: prompt, timestamp: Date.now() },
+  });
+  for (const result of results) {
+    if (!result?.message) continue;
+    activeEntries.push({
+      type: "custom_message",
+      ...result.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+  contextEntries.set(sessionId, activeEntries);
+  return results;
 }
 
 before(async () => {
@@ -44,6 +72,7 @@ before(async () => {
   handlers = {};
   entries = [];
   notifications = [];
+  contextEntries = new Map();
 
   const fakePi = {
     on(name: string, handler: (event: any, ctx: any) => any) {
@@ -87,50 +116,66 @@ test("slash command stores independent goals for independent pi sessions", async
   assert.equal(notifications.length, 2);
 });
 
-test("before_agent_start freezes one auditable goal message for every LLM call in a user turn", async () => {
+test("active goal is appended once and leaves the next user turn cache-prefix append-only", async () => {
   const sessionId = "extension-freeze";
   const ctx = runtimeContext(sessionId);
   await goalCommand.handler("finish frozen context", ctx);
-  await fire("before_agent_start", { prompt: "work" }, ctx);
-
-  const base = { messages: [{ role: "user", content: "work", timestamp: 1 }] };
-  const first = (await fire("context", structuredClone(base), ctx))[0];
-  const second = (await fire("context", structuredClone(base), ctx))[0];
-  assert.deepEqual(goalMessage(second), goalMessage(first));
+  const firstResults = await startTurn(sessionId, "work");
+  const first = goalMessage(firstResults);
+  assert.ok(first);
+  assert.equal(first.details.status, "active");
   assert.equal(goal.getGoal(sessionId)?.userTurnCount, 1);
 
-  const snapshot = entries.find(entry => entry.type === "pi-harness-goal-snapshot")!;
-  assert.ok(snapshot);
-  assert.equal(readFileSync(snapshot.data.path, "utf-8"), goalMessage(first).content);
+  const firstSnapshot = entries.find(entry => entry.type === "pi-harness-goal-snapshot")!;
+  assert.ok(firstSnapshot);
+  assert.equal(readFileSync(firstSnapshot.data.path, "utf-8"), first.content);
 
-  await fire("before_agent_start", { prompt: "next" }, ctx);
-  const third = (await fire("context", { messages: [{ role: "user", content: "next" }] }, ctx))[0];
+  const cachedPrefix = structuredClone(contextEntries.get(sessionId)!);
+  const secondResults = await startTurn(sessionId, "next");
+  assert.equal(goalMessage(secondResults), undefined, "unchanged active goal must not be injected again");
+  assert.deepEqual(contextEntries.get(sessionId)!.slice(0, cachedPrefix.length), cachedPrefix);
   assert.equal(goal.getGoal(sessionId)?.userTurnCount, 2);
-  assert.notEqual(goalMessage(third).content, goalMessage(first).content);
+  const snapshots = entries.filter(entry => entry.type === "pi-harness-goal-snapshot");
+  assert.equal(snapshots.length, 2);
+  assert.equal(snapshots[1].data.snapshotId, snapshots[0].data.snapshotId);
 });
 
-test("a parent session frozen goal never leaks into a child session context", async () => {
+test("a forked parent goal is explicitly deactivated in the child session", async () => {
   const parentCtx = runtimeContext("extension-parent");
-  const childCtx = runtimeContext("extension-child");
   await goalCommand.handler("parent-only objective", parentCtx);
-  await fire("before_agent_start", { prompt: "parent work" }, parentCtx);
-  const parentResult = (await fire(
-    "context",
-    { messages: [{ role: "user", content: "parent work" }] },
-    parentCtx,
-  ))[0];
-  const leakedMessage = goalMessage(parentResult);
-  assert.ok(leakedMessage);
+  const parentResults = await startTurn("extension-parent", "parent work");
+  assert.equal(goalMessage(parentResults).details.status, "active");
 
-  await fire("before_agent_start", { prompt: "child work" }, childCtx);
-  const childResult = (await fire(
-    "context",
-    { messages: [leakedMessage, { role: "user", content: "child work" }] },
-    childCtx,
-  ))[0];
+  contextEntries.set("extension-child", structuredClone(contextEntries.get("extension-parent")!));
+  const childResults = await startTurn("extension-child", "child work");
+  const childMarker = goalMessage(childResults);
   assert.equal(goal.getGoal("extension-child"), null);
-  assert.equal(childResult.messages.length, 1);
-  assert.equal(childResult.messages[0].role, "user");
+  assert.equal(childMarker.details.status, "inactive");
+  assert.match(childMarker.content, /not active in this session/i);
+});
+
+test("pause, resume, and clear append lifecycle markers without rewriting cached history", async () => {
+  const sessionId = "extension-lifecycle";
+  await goalCommand.handler("lifecycle objective", runtimeContext(sessionId));
+  await startTurn(sessionId, "start");
+
+  let cachedPrefix = structuredClone(contextEntries.get(sessionId)!);
+  await goalCommand.handler("pause", runtimeContext(sessionId));
+  let results = await startTurn(sessionId, "paused turn");
+  assert.equal(goalMessage(results).details.status, "paused");
+  assert.deepEqual(contextEntries.get(sessionId)!.slice(0, cachedPrefix.length), cachedPrefix);
+
+  cachedPrefix = structuredClone(contextEntries.get(sessionId)!);
+  await goalCommand.handler("resume", runtimeContext(sessionId));
+  results = await startTurn(sessionId, "resumed turn");
+  assert.equal(goalMessage(results).details.status, "active");
+  assert.deepEqual(contextEntries.get(sessionId)!.slice(0, cachedPrefix.length), cachedPrefix);
+
+  cachedPrefix = structuredClone(contextEntries.get(sessionId)!);
+  await goalCommand.handler("off", runtimeContext(sessionId));
+  results = await startTurn(sessionId, "cleared turn");
+  assert.equal(goalMessage(results).details.status, "cleared");
+  assert.deepEqual(contextEntries.get(sessionId)!.slice(0, cachedPrefix.length), cachedPrefix);
 });
 
 test("failed Board execution never completes a goal", async () => {
@@ -217,5 +262,5 @@ test("goal status uses operator UI and does not inject persistent status message
   assert.equal(goal.getGoal(sessionId), null);
   assert.ok(notifications.some(item => item.message.includes("Goal paused")));
   assert.ok(notifications.some(item => item.message.includes("Goal resumed")));
-  assert.equal((handlers.context ?? []).length, 1);
+  assert.equal((handlers.context ?? []).length, 1, "context hook is legacy-status cleanup only");
 });

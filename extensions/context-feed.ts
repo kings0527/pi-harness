@@ -19,6 +19,7 @@ const CRITICAL_MESSAGE_TYPE = "pi-harness-board-critical";
 const participatingTopics = new Set<string>();
 const announcedCriticalNotes = new Set<string>();
 const activeKnowledgeScopes = new Set<string>();
+const pendingCriticalBySession = new Map<string, CriticalUpdate[]>();
 let scopeCache: Map<string, ScopeEntry> = new Map();
 let lastSizeWarningKey: string | null = null;
 let lastHealthWarningKey: string | null = null;
@@ -36,8 +37,6 @@ interface FrozenReference {
   topicSeqs: Record<string, number>;
   frozenAt: number;
 }
-
-let frozenReference: FrozenReference | null = null;
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf-8").digest("hex");
@@ -77,6 +76,7 @@ function emitSizeWarning(
   injectedContent: string,
   knowledgeBytes: number,
   boardBytes: number,
+  retainedBytes: number,
   ctx: any,
 ): void {
   const contextWindow = contextWindowFrom(ctx);
@@ -96,7 +96,8 @@ function emitSizeWarning(
   const percent = (assessment.ratio * 100).toFixed(1);
   const knowledgeTokens = Math.ceil(knowledgeBytes / 3);
   const boardTokens = Math.ceil(boardBytes / 3);
-  const message = `Full context preserved: ~${assessment.estimatedTokens} tokens (${percent}% of ${contextWindow}); knowledge ~${knowledgeTokens}, Board ~${boardTokens}. Review active project/workspace/global knowledge indexes and open Board topics for stale, incorrect, duplicate, or overly verbose content.`;
+  const retainedTokens = Math.ceil(retainedBytes / 3);
+  const message = `Full context preserved: ~${assessment.estimatedTokens} tokens (${percent}% of ${contextWindow}); current knowledge ~${knowledgeTokens}, Board ~${boardTokens}, retained runtime references ~${retainedTokens}. Review active project/workspace/global knowledge indexes and open Board topics for stale, incorrect, duplicate, or overly verbose content.`;
   console.error(`[context-feed] WARN: ${message}`);
   try {
     appendEvent("hook_warn", {
@@ -104,6 +105,7 @@ function emitSizeWarning(
       ...assessment,
       knowledgeBytes,
       boardBytes,
+      retainedBytes,
       message,
     });
   } catch {
@@ -151,7 +153,6 @@ function freezeReference(
 
 function referenceMessage(snapshot: FrozenReference): any {
   return {
-    role: "custom",
     customType: REFERENCE_MESSAGE_TYPE,
     content: snapshot.content,
     display: false,
@@ -160,8 +161,50 @@ function referenceMessage(snapshot: FrozenReference): any {
       path: snapshot.path,
       bytes: snapshot.bytes,
       frozenAt: snapshot.frozenAt,
+      state: "active",
     },
-    timestamp: snapshot.frozenAt,
+  };
+}
+
+interface PersistedReferenceState {
+  snapshotId?: string;
+  state: "active" | "cleared";
+}
+
+function latestReferenceState(entries: any): PersistedReferenceState | null {
+  if (!Array.isArray(entries)) return null;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type !== "custom_message" || entry.customType !== REFERENCE_MESSAGE_TYPE) continue;
+    const details = entry.details ?? {};
+    return {
+      snapshotId: typeof details.snapshotId === "string" ? details.snapshotId : undefined,
+      state: details.state === "cleared" ? "cleared" : "active",
+    };
+  }
+  return null;
+}
+
+function persistedRuntimeReferenceContent(ctx: any): string {
+  const entries = ctx?.sessionManager?.buildContextEntries?.();
+  if (!Array.isArray(entries)) return "";
+  return entries
+    .filter(entry => entry?.type === "custom_message"
+      && (entry.customType === REFERENCE_MESSAGE_TYPE || entry.customType === CRITICAL_MESSAGE_TYPE))
+    .map(entry => typeof entry.content === "string" ? entry.content : JSON.stringify(entry.content ?? []))
+    .join("\n\n");
+}
+
+function clearedReferenceMessage(): any {
+  return {
+    customType: REFERENCE_MESSAGE_TYPE,
+    content: [
+      '<reference_context state="cleared">',
+      "<policy>Earlier pi-harness-reference snapshots are superseded. No passive reference sources are active.</policy>",
+      "</reference_context>",
+    ].join("\n"),
+    display: false,
+    details: { state: "cleared" },
   };
 }
 
@@ -189,7 +232,7 @@ export default async function (pi: any) {
     participatingTopics.clear();
     announcedCriticalNotes.clear();
     activeKnowledgeScopes.clear();
-    frozenReference = null;
+    pendingCriticalBySession.clear();
     lastSizeWarningKey = null;
     lastHealthWarningKey = null;
     restoreAnnouncedCriticalNotes(ctx);
@@ -235,45 +278,55 @@ export default async function (pi: any) {
   });
 
   pi.on("before_agent_start", async (event: any, ctx: any) => {
+    const id = ctx.sessionManager.getSessionId();
     const knowledge = buildKnowledgeSnapshot([...activeKnowledgeScopes]);
     const board = buildBoardSnapshot(participatingTopics);
     emitHealthWarning(knowledge.issues);
 
-    // A new user prompt is the sole refresh boundary for passive reference data.
-    frozenReference = freezeReference(pi, event, knowledge, board);
+    // A new user prompt is the sole refresh boundary. The resulting message is
+    // persisted only when its content changes, so prior provider requests remain
+    // exact prefixes of later requests (ADR-0016).
+    const frozenReference = freezeReference(pi, event, knowledge, board);
 
     const newCritical = board.criticalUpdates.filter(update => !announcedCriticalNotes.has(update.key));
+    pendingCriticalBySession.set(id, newCritical);
     const criticalContent = newCritical.length > 0 ? formatCriticalMessage(newCritical) : "";
-    const injectedContent = [frozenReference?.content, criticalContent].filter(Boolean).join("\n\n");
+    const latestActive = latestReferenceState(ctx.sessionManager.buildContextEntries());
+    const latestHistorical = latestReferenceState(ctx.sessionManager.getBranch());
+    const referenceUpdate = !frozenReference
+      ? latestActive?.state === "cleared" || (!latestActive && !latestHistorical)
+        ? undefined
+        : clearedReferenceMessage()
+      : latestActive?.state === "active" && latestActive.snapshotId === frozenReference.id
+        ? undefined
+        : referenceMessage(frozenReference);
+    const retainedContent = persistedRuntimeReferenceContent(ctx);
+    const injectedContent = [retainedContent, referenceUpdate?.content, criticalContent].filter(Boolean).join("\n\n");
+    const retainedBytes = Buffer.byteLength(retainedContent, "utf-8");
     const criticalBytes = Buffer.byteLength(criticalContent, "utf-8");
     if (injectedContent) {
-      emitSizeWarning(injectedContent, knowledge.bytes, board.bytes + criticalBytes, ctx);
+      emitSizeWarning(injectedContent, knowledge.bytes, board.bytes + criticalBytes, retainedBytes, ctx);
     }
 
-    if (newCritical.length === 0) return;
+    return referenceUpdate ? { message: referenceUpdate } : undefined;
+  });
+
+  // A second handler lets Pi persist CRITICAL steering as its own visible custom
+  // message while the passive reference remains hidden.
+  pi.on("before_agent_start", async (_event: any, ctx: any) => {
+    const id = ctx.sessionManager.getSessionId();
+    const updates = pendingCriticalBySession.get(id) ?? [];
+    pendingCriticalBySession.delete(id);
+    if (updates.length === 0) return;
     return {
       message: {
         customType: CRITICAL_MESSAGE_TYPE,
-        content: criticalContent,
+        content: formatCriticalMessage(updates),
         display: true,
         details: {
-          sources: newCritical.map(update => `Board ${update.topic}#${update.note.seq}`),
+          sources: updates.map(update => `Board ${update.topic}#${update.note.seq}`),
         },
       },
     };
-  });
-
-  pi.on("context", async (event: any) => {
-    if (!frozenReference || !Array.isArray(event.messages)) return {};
-
-    // Context events receive a deep copy. Insert one distinct reference message
-    // immediately before the current real user prompt without mutating its bytes.
-    const messages = event.messages.filter(
-      (message: any) => !(message.role === "custom" && message.customType === REFERENCE_MESSAGE_TYPE),
-    );
-    let insertionIndex = messages.findLastIndex((message: any) => message.role === "user");
-    if (insertionIndex < 0) insertionIndex = messages.length;
-    messages.splice(insertionIndex, 0, referenceMessage(frozenReference));
-    return { messages };
   });
 }

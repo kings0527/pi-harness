@@ -208,7 +208,7 @@ function escapeXml(value: string): string {
 export function renderGoalReference(goal: GoalState): string {
   const evidenceTag = goalEvidenceTag(goal.id);
   return [
-    `<active_goal id="${escapeXml(goal.id)}" scope="current-session" user_turn="${goal.userTurnCount}">`,
+    `<active_goal id="${escapeXml(goal.id)}" scope="current-session">`,
     "<instruction>This is the persistent execution target for the current session. Every action should serve it.</instruction>",
     `<objective>${escapeXml(goal.text)}</objective>`,
     `<completion required_tags="${GOAL_MET_TAG} ${escapeXml(evidenceTag)}">When fully achieved, post a Board note containing completion evidence with both required tags.</completion>`,

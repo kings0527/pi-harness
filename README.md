@@ -31,7 +31,7 @@ pi install github:kings0527/pi-harness         # 从 GitHub
 - **强制溯源**：每条知识条目必须带 `source`（如 `topic-<id>#seq-<N>`），无溯源直接被 runtime 拒绝。
 - **CONFLICT 标记机制**：新知识与旧条目冲突时用 `distill-conflict` 只追加冲突块，永不静默覆盖原内容。
 - **完整上下文**：knowledge index、Board notes 与 subagent 输出保持完整；估算达到当前模型窗口 20% 时仅告警，提示检查过期、错误、重复或过长内容。
-- **稳定且可审计的注入**：reference 每个用户轮次只冻结一次，精确字节写入 `.pi-board/context-snapshots/`；CRITICAL Board note 作为带来源的可见消息进入会话。
+- **稳定且可审计的注入**：reference 每个用户轮次只冻结一次，精确字节写入 `.pi-board/context-snapshots/`；快照或 goal 状态变化时以 append-only 持久消息进入会话，相同内容不重复注入，CRITICAL Board note 保持带来源可见。
 
 ### 哲学层：Discipline + Doctrine
 
@@ -66,7 +66,7 @@ extensions/          ← pi 薄适配层（工具注册 + hooks，唯一接触 p
   board.ts           共享黑板工具
   spawn.ts           多 agent spawn 工具
   storm.ts           /storm 命令注册
-  context-feed.ts    冻结、审计并注入 knowledge + Board reference
+  context-feed.ts    冻结、审计并追加 knowledge + Board reference
   discipline.ts      纪律 hooks（read-before-write, fail-loud, diff-scope）
   convergence.ts     收敛门禁（close 前置校验 + spawn 轮次护栏）
   doctrine.ts        常驻认知注入（before_agent_start）
@@ -119,6 +119,8 @@ docs/decisions/      ← 架构决策记录（ADR）
 - **0012**: 完整保留上下文，超量只告警
 - **0013**: 每用户轮次冻结且可审计的 reference 注入
 - **0014**: Monorepo knowledge 固定 project/workspace/global 三层作用域
+- **0015**: `/goal` 按 session 隔离并以持久快照绑定完成证据
+- **0016**: Runtime reference 只追加状态变化，保持跨用户轮次 cache prefix
 
 ## 开发
 

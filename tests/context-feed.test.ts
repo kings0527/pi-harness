@@ -18,8 +18,9 @@ let sandbox: string;
 let workspaceDir: string;
 let projectDir: string;
 let projectKnowledgeRoot: string;
-let handlers: Record<string, (...args: any[]) => any>;
+let handlers: Record<string, Array<(...args: any[]) => any>>;
 let sessionEntries: Array<{ type: string; data: any }>;
+let contextEntries: any[];
 let board: typeof import("../core/board/index.ts");
 
 before(async () => {
@@ -68,16 +69,17 @@ before(async () => {
 
   handlers = {};
   sessionEntries = [];
+  contextEntries = [];
   const extension = (await import(`../extensions/context-feed.ts?test=${Date.now()}`)).default;
   await extension({
     on(name: string, handler: (...args: any[]) => any) {
-      handlers[name] = handler;
+      (handlers[name] ??= []).push(handler);
     },
     appendEntry(type: string, data: any) {
       sessionEntries.push({ type, data });
     },
   });
-  await handlers.session_start({}, {});
+  await fire("session_start", {}, runtimeContext(1_000_000));
 });
 
 after(() => {
@@ -89,25 +91,55 @@ after(() => {
 
 function runtimeContext(window: number): any {
   return {
+    sessionManager: {
+      getSessionId: () => "context-feed-session",
+      buildContextEntries: () => contextEntries,
+      getBranch: () => contextEntries,
+    },
     model: { id: "test-model", contextWindow: window },
     getContextUsage: () => ({ tokens: 0, contextWindow: window, percent: 0 }),
   };
 }
 
-async function startTurn(prompt = "question", window = 1_000_000): Promise<any> {
-  return handlers.before_agent_start({ prompt, systemPrompt: "system" }, runtimeContext(window));
+async function fire(name: string, event: any, ctx: any): Promise<any[]> {
+  const results = [];
+  for (const handler of handlers[name] ?? []) results.push(await handler(event, ctx));
+  return results;
 }
 
-function customFrom(result: any): any[] {
-  if (!result?.message) return [];
-  return [{ role: "custom", ...result.message, timestamp: Date.now() }];
-}
-
-async function acknowledgeCritical(result: any): Promise<void> {
-  if (!result?.message) return;
-  await handlers.message_end({
-    message: { role: "custom", ...result.message, timestamp: Date.now() },
+async function startTurn(prompt = "question", window = 1_000_000): Promise<any[]> {
+  const results = await fire(
+    "before_agent_start",
+    { prompt, systemPrompt: "system" },
+    runtimeContext(window),
+  );
+  contextEntries.push({
+    type: "message",
+    message: { role: "user", content: prompt, timestamp: Date.now() },
   });
+  for (const result of results) {
+    if (!result?.message) continue;
+    contextEntries.push({
+      type: "custom_message",
+      ...result.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+  return results;
+}
+
+function messageOf(results: any[], customType: string): any | undefined {
+  return results
+    .flatMap(result => result?.message ? [result.message] : [])
+    .find(message => message.customType === customType);
+}
+
+async function acknowledgeCritical(results: any[]): Promise<void> {
+  const message = messageOf(results, "pi-harness-board-critical");
+  if (!message) return;
+  await fire("message_end", {
+    message: { role: "custom", ...message, timestamp: Date.now() },
+  }, runtimeContext(1_000_000));
 }
 
 test("按 project + workspace + global 分层注入，不扫描兄弟项目", async () => {
@@ -115,23 +147,19 @@ test("按 project + workspace + global 分层注入，不扫描兄弟项目", as
   mkdirSync(siblingKnowledge, { recursive: true });
   writeFileSync(join(siblingKnowledge, "index.md"), "sibling.md | MUST-NOT-INJECT\n", "utf-8");
 
-  const beforeResult = await startTurn();
-  assert.equal(beforeResult.message.customType, "pi-harness-board-critical");
-  assert.equal(beforeResult.message.display, true);
-  assert.match(beforeResult.message.content, /Board complete-context#12/);
-  assert.match(beforeResult.message.content, /LAST-CRITICAL-/);
-  assert.doesNotMatch(beforeResult.message.content, /FIRST-NOTE-/);
+  const results = await startTurn();
+  const referenceMessage = messageOf(results, "pi-harness-reference");
+  const criticalMessage = messageOf(results, "pi-harness-board-critical");
+  assert.ok(referenceMessage);
+  assert.equal(referenceMessage.display, false);
+  assert.ok(criticalMessage);
+  assert.equal(criticalMessage.display, true);
+  assert.match(criticalMessage.content, /Board complete-context#12/);
+  assert.match(criticalMessage.content, /LAST-CRITICAL-/);
+  assert.doesNotMatch(criticalMessage.content, /FIRST-NOTE-/);
+  assert.equal(handlers.context, undefined, "persistent references must not be moved by a context hook");
 
-  const user = { role: "user", content: [{ type: "text", text: "question" }] };
-  const event = { messages: [user, ...customFrom(beforeResult)] };
-  const originalEvent = JSON.stringify(event);
-  const result = await handlers.context(event, runtimeContext(1_000_000));
-
-  assert.equal(JSON.stringify(event), originalEvent, "context hook must not rewrite the real user message");
-  assert.equal(result.messages[0].role, "custom");
-  assert.equal(result.messages[0].customType, "pi-harness-reference");
-  assert.strictEqual(result.messages[1], user);
-  const reference = result.messages[0].content as string;
+  const reference = referenceMessage.content as string;
   assert.match(reference, /reference_context/);
   assert.match(reference, /knowledge\(project:/);
   assert.match(reference, /knowledge\(workspace:/);
@@ -151,40 +179,39 @@ test("按 project + workspace + global 分层注入，不扫描兄弟项目", as
   assert.equal(snapshotEntry.type, "pi-harness-context-snapshot");
   assert.equal(readFileSync(snapshotEntry.data.path, "utf-8"), reference);
   assert.equal(createHash("sha256").update(reference).digest("hex"), snapshotEntry.data.snapshotId);
-  await acknowledgeCritical(beforeResult);
+  await acknowledgeCritical(results);
 });
 
-test("同一用户轮次冻结 reference；下一用户轮次刷新", async () => {
-  const first = await handlers.context(
-    { messages: [{ role: "user", content: "question" }] },
-    runtimeContext(1_000_000),
-  );
-  const frozen = first.messages[0].content as string;
+test("相同 reference 不重复追加；变化时追加新快照且保留旧 request 前缀", async () => {
+  const frozen = contextEntries.find(
+    entry => entry.type === "custom_message" && entry.customType === "pi-harness-reference",
+  ).content as string;
+
+  const beforeUnchanged = structuredClone(contextEntries);
+  const unchanged = await startTurn("same sources");
+  assert.equal(messageOf(unchanged, "pi-harness-reference"), undefined);
+  assert.deepEqual(contextEntries.slice(0, beforeUnchanged.length), beforeUnchanged);
 
   board.postNote("complete-context", "worker", "NEW-MID-LOOP-NOTE");
   board.postNote("complete-context", "human", "NEW-MID-LOOP-CRITICAL", { priority: "critical" });
 
-  const second = await handlers.context(
-    { messages: [{ role: "user", content: "question" }] },
-    runtimeContext(1_000_000),
-  );
-  assert.equal(second.messages[0].content, frozen);
-  assert.doesNotMatch(second.messages[0].content, /NEW-MID-LOOP/);
-
-  const nextBefore = await startTurn("next question");
-  assert.match(nextBefore.message.content, /Board complete-context#14/);
-  assert.match(nextBefore.message.content, /NEW-MID-LOOP-CRITICAL/);
-  assert.doesNotMatch(nextBefore.message.content, /LAST-CRITICAL-/);
-  await acknowledgeCritical(nextBefore);
-
-  const third = await handlers.context(
-    { messages: [{ role: "user", content: "next question" }, ...customFrom(nextBefore)] },
-    runtimeContext(1_000_000),
-  );
-  const refreshed = third.messages[0].content as string;
+  const cachedPrefix = structuredClone(contextEntries);
+  const changed = await startTurn("next question");
+  assert.deepEqual(contextEntries.slice(0, cachedPrefix.length), cachedPrefix);
+  const refreshed = messageOf(changed, "pi-harness-reference").content as string;
   assert.notEqual(refreshed, frozen);
   assert.match(refreshed, /NEW-MID-LOOP-NOTE/);
   assert.doesNotMatch(refreshed, /NEW-MID-LOOP-CRITICAL/);
+  const critical = messageOf(changed, "pi-harness-board-critical");
+  assert.match(critical.content, /Board complete-context#14/);
+  assert.match(critical.content, /NEW-MID-LOOP-CRITICAL/);
+  assert.doesNotMatch(critical.content, /LAST-CRITICAL-/);
+  await acknowledgeCritical(changed);
+
+  const referenceCount = contextEntries.filter(
+    entry => entry.type === "custom_message" && entry.customType === "pi-harness-reference",
+  ).length;
+  assert.equal(referenceCount, 2);
 });
 
 test("达到模型窗口 20% 时只告警一次且保留全文", async () => {
@@ -193,12 +220,11 @@ test("达到模型窗口 20% 时只告警一次且保留全文", async () => {
   console.error = (...args: any[]) => errors.push(args.join(" "));
   try {
     await startTurn("small-window", 1_000);
-    const first = await handlers.context(
-      { messages: [{ role: "user", content: "small-window" }] },
-      runtimeContext(1_000),
+    const latestReference = [...contextEntries].reverse().find(
+      (entry: any) => entry.type === "custom_message" && entry.customType === "pi-harness-reference",
     );
-    assert.match(first.messages[0].content, /END-LARGE-DESCRIPTION/);
-    assert.match(first.messages[0].content, /NEW-MID-LOOP-NOTE/);
+    assert.match(latestReference.content, /END-LARGE-DESCRIPTION/);
+    assert.match(latestReference.content, /NEW-MID-LOOP-NOTE/);
 
     await startTurn("small-window-again", 1_000);
   } finally {
@@ -230,21 +256,12 @@ test("过期 index 行触发健康提醒但不自动删除", async () => {
 });
 
 test("session resume 从持久消息恢复 CRITICAL 已读集合", async () => {
-  await handlers.session_start(
+  await fire(
+    "session_start",
     { reason: "resume" },
-    {
-      sessionManager: {
-        getBranch: () => [
-          {
-            type: "custom_message",
-            customType: "pi-harness-board-critical",
-            details: { sources: ["Board complete-context#12", "Board complete-context#14"] },
-          },
-        ],
-      },
-    },
+    runtimeContext(1_000_000),
   );
 
-  const result = await startTurn("resumed");
-  assert.equal(result, undefined);
+  const results = await startTurn("resumed");
+  assert.equal(messageOf(results, "pi-harness-board-critical"), undefined);
 });

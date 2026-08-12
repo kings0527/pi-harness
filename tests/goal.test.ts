@@ -90,16 +90,18 @@ test("completion requires the exact persisted Board note and current goal id", (
 
 test("goal reference snapshots are content-addressed and preserve exact bytes", () => {
   const created = goal.setGoal("session-snapshot", "verify <goal> & evidence");
-  const active = goal.beginGoalTurn("session-snapshot", created.id)!;
-  const first = goal.createGoalReferenceSnapshot(active);
-  const second = goal.createGoalReferenceSnapshot(active);
+  const firstTurn = goal.beginGoalTurn("session-snapshot", created.id)!;
+  const first = goal.createGoalReferenceSnapshot(firstTurn);
+  const secondTurn = goal.beginGoalTurn("session-snapshot", created.id)!;
+  const second = goal.createGoalReferenceSnapshot(secondTurn);
 
   assert.equal(first.id, second.id);
   assert.equal(first.content, second.content);
   assert.equal(readFileSync(first.path, "utf-8"), first.content);
-  assert.match(first.content, /user_turn="1"/);
+  assert.doesNotMatch(first.content, /user_turn=/);
   assert.match(first.content, /verify &lt;goal&gt; &amp; evidence/);
-  assert.match(first.content, new RegExp(goal.goalEvidenceTag(active.id)));
+  assert.match(first.content, new RegExp(goal.goalEvidenceTag(firstTurn.id)));
+  assert.equal(second.userTurnCount, 2, "turn accounting stays in metadata, outside prompt bytes");
 });
 
 test("clearGoal removes only the selected session goal", () => {

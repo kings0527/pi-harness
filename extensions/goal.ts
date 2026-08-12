@@ -19,6 +19,15 @@ const GOAL_MESSAGE_TYPE = "pi-harness-goal";
 const LEGACY_STATUS_MESSAGE_TYPE = "goal-status";
 const GOAL_SNAPSHOT_ENTRY_TYPE = "pi-harness-goal-snapshot";
 
+type GoalMarkerStatus = "active" | "paused" | "achieved" | "cleared" | "inactive";
+
+interface GoalMarker {
+  goalId: string;
+  sessionId: string;
+  status: GoalMarkerStatus;
+  snapshotId?: string;
+}
+
 function sessionId(ctx: ExtensionContext): string {
   return ctx.sessionManager.getSessionId();
 }
@@ -29,24 +38,52 @@ function notify(ctx: ExtensionContext, message: string, level: "info" | "warning
 
 function activeGoalMessage(snapshot: GoalReferenceSnapshot) {
   return {
-    role: "custom" as const,
     customType: GOAL_MESSAGE_TYPE,
     content: snapshot.content,
     display: false,
     details: {
+      sessionId: snapshot.sessionId,
       goalId: snapshot.goalId,
+      status: "active" as const,
       snapshotId: snapshot.id,
       path: snapshot.path,
       bytes: snapshot.bytes,
       userTurnCount: snapshot.userTurnCount,
       frozenAt: snapshot.frozenAt,
     },
-    timestamp: snapshot.frozenAt,
   };
 }
 
+function inactiveGoalMessage(currentSessionId: string, marker: GoalMarker, status: Exclude<GoalMarkerStatus, "active">) {
+  return {
+    customType: GOAL_MESSAGE_TYPE,
+    content: [
+      `<goal_state id="${marker.goalId}" scope="current-session" status="${status}">`,
+      "<instruction>This goal is not active in this session. Do not treat it as the current execution target.</instruction>",
+      "</goal_state>",
+    ].join("\n"),
+    display: false,
+    details: {
+      sessionId: currentSessionId,
+      goalId: marker.goalId,
+      status,
+    },
+  };
+}
+
+function latestGoalMarker(entries: ReturnType<ExtensionContext["sessionManager"]["getBranch"]>): GoalMarker | null {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.type !== "custom_message" || entry.customType !== GOAL_MESSAGE_TYPE) continue;
+    const details = entry.details as Partial<GoalMarker> | undefined;
+    if (!details || typeof details.goalId !== "string" || typeof details.sessionId !== "string") continue;
+    if (!details.status || !["active", "paused", "achieved", "cleared", "inactive"].includes(details.status)) continue;
+    return details as GoalMarker;
+  }
+  return null;
+}
+
 export default async function goalExtension(pi: ExtensionAPI) {
-  const frozenBySession = new Map<string, GoalReferenceSnapshot>();
   const warnedGoalIds = new Set<string>();
 
   pi.registerCommand("goal", {
@@ -72,26 +109,22 @@ export default async function goalExtension(pi: ExtensionAPI) {
       if (trimmed === "pause") {
         const paused = pauseGoal(id);
         notify(ctx, paused ? `Goal paused: ${paused.text}` : "No active goal to pause.", paused ? "info" : "warning");
-        frozenBySession.delete(id);
         return;
       }
 
       if (trimmed === "resume") {
         const resumed = resumeGoal(id);
         notify(ctx, resumed ? `Goal resumed: ${resumed.text}` : "No paused goal to resume.", resumed ? "info" : "warning");
-        frozenBySession.delete(id);
         return;
       }
 
       if (trimmed === "off") {
         const cleared = clearGoal(id);
         notify(ctx, cleared ? `Goal cleared: ${cleared.text}` : "No goal to clear.", cleared ? "info" : "warning");
-        frozenBySession.delete(id);
         return;
       }
 
       const goal = setGoal(id, trimmed);
-      frozenBySession.delete(id);
       notify(
         ctx,
         `Goal set: ${goal.text}\nCompletion tags: ${GOAL_MET_TAG}, ${goalEvidenceTag(goal.id)}`,
@@ -104,27 +137,35 @@ export default async function goalExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.on("session_start", async (_event, ctx) => {
-    frozenBySession.delete(sessionId(ctx));
-  });
-
-  // before_agent_start is the sole per-user-prompt refresh boundary (ADR-0013).
+  // Persist only state changes. Rewriting/moving an ephemeral goal message would
+  // cut the provider cache prefix at the previous user turn (ADR-0016).
   pi.on("before_agent_start", async (_event, ctx) => {
     const id = sessionId(ctx);
     const current = getGoal(id);
+    const latestActive = latestGoalMarker(ctx.sessionManager.buildContextEntries());
+    const latestHistorical = latestGoalMarker(ctx.sessionManager.getBranch());
     if (!current || current.status !== "active") {
-      frozenBySession.delete(id);
-      return;
+      const basis = latestHistorical ?? (current ? {
+        sessionId: id,
+        goalId: current.id,
+        status: current.status,
+      } as GoalMarker : null);
+      if (!basis) return;
+      const status: Exclude<GoalMarkerStatus, "active"> = current
+        ? current.status as "paused" | "achieved"
+        : basis.sessionId === id ? "cleared" : "inactive";
+      if (latestActive?.sessionId === id
+        && latestActive.goalId === basis.goalId
+        && latestActive.status === status) return;
+      return { message: inactiveGoalMessage(id, basis, status) };
     }
 
     const advanced = beginGoalTurn(id, current.id);
     if (!advanced) {
-      frozenBySession.delete(id);
       return;
     }
 
     const snapshot = createGoalReferenceSnapshot(advanced);
-    frozenBySession.set(id, snapshot);
     const metadata = {
       sessionId: id,
       goalId: advanced.id,
@@ -153,25 +194,23 @@ export default async function goalExtension(pi: ExtensionAPI) {
         });
       }
     }
+
+    if (latestActive?.sessionId === id
+      && latestActive.goalId === advanced.id
+      && latestActive.status === "active"
+      && latestActive.snapshotId === snapshot.id) {
+      return;
+    }
+    return { message: activeGoalMessage(snapshot) };
   });
 
-  pi.on("context", async (event, ctx) => {
+  // One-time migration cleanup for old TUI status messages. Persistent goal
+  // lifecycle markers remain untouched and therefore append-only.
+  pi.on("context", async event => {
     const messages = event.messages.filter(
-      message => !(message.role === "custom"
-        && (message.customType === GOAL_MESSAGE_TYPE || message.customType === LEGACY_STATUS_MESSAGE_TYPE)),
+      message => !(message.role === "custom" && message.customType === LEGACY_STATUS_MESSAGE_TYPE),
     );
-    const snapshot = frozenBySession.get(sessionId(ctx));
-    if (!snapshot) return messages.length === event.messages.length ? {} : { messages };
-
-    let insertionIndex = messages.length;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index].role === "user") {
-        insertionIndex = index;
-        break;
-      }
-    }
-    messages.splice(insertionIndex, 0, activeGoalMessage(snapshot));
-    return { messages };
+    return messages.length === event.messages.length ? {} : { messages };
   });
 
   // Completion is evaluated only after Board execution and verified against the persisted note.
