@@ -1,172 +1,253 @@
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { generateDigest } from "../core/board/digest.ts";
-import type { DigestStrategy } from "../core/board/digest.ts";
+import { createHash } from "node:crypto";
 import { listTopics } from "../core/board/index.ts";
-import { getStorageRoot } from "../core/storage/index.ts";
+import {
+  buildBoardSnapshot,
+  buildKnowledgeSnapshot,
+  buildReferenceContent,
+  formatCriticalMessage,
+  type BoardSnapshot,
+  type CriticalUpdate,
+  type KnowledgeSnapshot,
+} from "../core/context-reference/index.ts";
+import { assessContextSize } from "../core/context-size/index.ts";
+import { writeContextSnapshot } from "../core/context-snapshot/index.ts";
+import { appendEvent } from "../core/events/index.ts";
 
-// Knowledge index cache
-let knowledgeIndexCache: { content: string; fetchedAt: number } | null = null;
-const KNOWLEDGE_CACHE_TTL = 60_000; // 60 seconds
-
-// Track which topics this agent participates in
+const REFERENCE_MESSAGE_TYPE = "pi-harness-reference";
+const CRITICAL_MESSAGE_TYPE = "pi-harness-board-critical";
 const participatingTopics = new Set<string>();
+const announcedCriticalNotes = new Set<string>();
+let lastSizeWarningKey: string | null = null;
+let lastHealthWarningKey: string | null = null;
 
-// Last injected seq per topic (to avoid duplicate injection)
-const lastInjectedSeq = new Map<string, number>();
+interface FrozenReference {
+  id: string;
+  path: string;
+  content: string;
+  bytes: number;
+  knowledgeBytes: number;
+  boardBytes: number;
+  topicSeqs: Record<string, number>;
+  frozenAt: number;
+}
 
-// Resolve the current agent's digestStrategy from its role card
-function resolveDigestStrategy(): DigestStrategy {
-  const packageRoot = join(import.meta.dirname || process.cwd(), "..");
-  const agentsDir = join(packageRoot, "agents");
+let frozenReference: FrozenReference | null = null;
 
-  if (!existsSync(agentsDir)) return "auto";
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf-8").digest("hex");
+}
 
-  // Check PI_AGENT_NAME env or fall back to scanning
-  const agentName = process.env.PI_AGENT_NAME;
-  if (agentName) {
-    const cardPath = join(agentsDir, `${agentName}.json`);
-    if (existsSync(cardPath)) {
-      try {
-        const card = JSON.parse(readFileSync(cardPath, "utf-8"));
-        if (card.digestStrategy) return card.digestStrategy as DigestStrategy;
-      } catch { /* malformed card — fall through */ }
+function contextWindowFrom(ctx: any): number | null {
+  const value = ctx?.model?.contextWindow ?? ctx?.getContextUsage?.()?.contextWindow;
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function emitHealthWarning(issues: KnowledgeSnapshot["issues"]): void {
+  if (issues.length === 0) {
+    lastHealthWarningKey = null;
+    return;
+  }
+  const details = issues
+    .map(({ scope, issue }) => `${scope}:${issue.path} (${issue.reason}${issue.detail ? `: ${issue.detail}` : ""})`)
+    .join("; ");
+  const key = sha256(details);
+  if (key === lastHealthWarningKey) return;
+  lastHealthWarningKey = key;
+
+  const message = `Knowledge index health check found stale/invalid rows: ${details}. Review the selected index and remove or repair only confirmed obsolete entries; no automatic cleanup was performed.`;
+  console.error(`[context-feed] WARN: ${message}`);
+  try {
+    appendEvent("hook_warn", {
+      rule: "knowledge-index-health",
+      issues,
+      message,
+    });
+  } catch {
+    // Warning persistence is best-effort; reference delivery remains intact.
+  }
+}
+
+function emitSizeWarning(
+  injectedContent: string,
+  knowledgeBytes: number,
+  boardBytes: number,
+  ctx: any,
+): void {
+  const contextWindow = contextWindowFrom(ctx);
+  if (!contextWindow) return;
+
+  const assessment = assessContextSize(injectedContent, contextWindow);
+  if (!assessment.shouldWarn) {
+    lastSizeWarningKey = null;
+    return;
+  }
+
+  // Warn once per continuous over-threshold episode for the active window.
+  const key = String(contextWindow);
+  if (key === lastSizeWarningKey) return;
+  lastSizeWarningKey = key;
+
+  const percent = (assessment.ratio * 100).toFixed(1);
+  const knowledgeTokens = Math.ceil(knowledgeBytes / 3);
+  const boardTokens = Math.ceil(boardBytes / 3);
+  const message = `Full context preserved: ~${assessment.estimatedTokens} tokens (${percent}% of ${contextWindow}); knowledge ~${knowledgeTokens}, Board ~${boardTokens}. Review active project/workspace/global knowledge indexes and open Board topics for stale, incorrect, duplicate, or overly verbose content.`;
+  console.error(`[context-feed] WARN: ${message}`);
+  try {
+    appendEvent("hook_warn", {
+      rule: "context-injection-size",
+      ...assessment,
+      knowledgeBytes,
+      boardBytes,
+      message,
+    });
+  } catch {
+    // Warning persistence is best-effort; reference delivery remains intact.
+  }
+}
+
+function freezeReference(
+  pi: any,
+  event: any,
+  knowledge: KnowledgeSnapshot,
+  board: BoardSnapshot,
+): FrozenReference | null {
+  const { content, sourceDigest } = buildReferenceContent(knowledge, board);
+  if (!content) return null;
+  const file = writeContextSnapshot(content);
+  const snapshot: FrozenReference = {
+    ...file,
+    content,
+    knowledgeBytes: knowledge.bytes,
+    boardBytes: board.bytes,
+    topicSeqs: board.topicSeqs,
+    frozenAt: Date.now(),
+  };
+
+  const metadata = {
+    snapshotId: snapshot.id,
+    sourceDigest,
+    path: snapshot.path,
+    bytes: snapshot.bytes,
+    knowledgeBytes: snapshot.knowledgeBytes,
+    boardBytes: snapshot.boardBytes,
+    topicSeqs: snapshot.topicSeqs,
+    promptDigest: sha256(String(event?.prompt ?? "")),
+    frozenAt: snapshot.frozenAt,
+  };
+  pi.appendEntry?.("pi-harness-context-snapshot", metadata);
+  try {
+    appendEvent("context_snapshot", metadata);
+  } catch {
+    // The content-addressed snapshot file remains the source of truth.
+  }
+  return snapshot;
+}
+
+function referenceMessage(snapshot: FrozenReference): any {
+  return {
+    role: "custom",
+    customType: REFERENCE_MESSAGE_TYPE,
+    content: snapshot.content,
+    display: false,
+    details: {
+      snapshotId: snapshot.id,
+      path: snapshot.path,
+      bytes: snapshot.bytes,
+      frozenAt: snapshot.frozenAt,
+    },
+    timestamp: snapshot.frozenAt,
+  };
+}
+
+function restoreAnnouncedCriticalNotes(ctx: any): void {
+  const entries = ctx?.sessionManager?.getBranch?.();
+  if (!Array.isArray(entries)) return;
+  for (const entry of entries) {
+    if (entry?.type === "custom_message") rememberCriticalMessage({ role: "custom", ...entry });
+  }
+}
+
+function rememberCriticalMessage(message: any): void {
+  if (message?.role !== "custom" || message.customType !== CRITICAL_MESSAGE_TYPE) return;
+  const sources = message.details?.sources;
+  if (!Array.isArray(sources)) return;
+  for (const source of sources) {
+    if (typeof source === "string" && source.startsWith("Board ")) {
+      announcedCriticalNotes.add(source.slice("Board ".length));
     }
   }
-
-  return "auto";
-}
-
-function readIndexFile(indexPath: string): string {
-  if (!existsSync(indexPath)) return "";
-  return readFileSync(indexPath, "utf-8").trim();
-}
-
-// ADR-0011: two fixed tiers — project (<cwd>/knowledge/) + global (~/.pi-harness/knowledge/).
-function getKnowledgeIndex(): string {
-  // Check cache freshness
-  if (knowledgeIndexCache && Date.now() - knowledgeIndexCache.fetchedAt < KNOWLEDGE_CACHE_TTL) {
-    return knowledgeIndexCache.content;
-  }
-
-  const sections: string[] = [];
-  const projectIndex = readIndexFile(join(process.cwd(), "knowledge", "index.md"));
-  if (projectIndex) {
-    sections.push(`Project knowledge index (<project-root>/knowledge/):\n${projectIndex}`);
-  }
-  const globalIndex = readIndexFile(join(homedir(), ".pi-harness", "knowledge", "index.md"));
-  if (globalIndex) {
-    sections.push(`Global knowledge index (~/.pi-harness/knowledge/):\n${globalIndex}`);
-  }
-
-  const content = sections.join("\n\n");
-  knowledgeIndexCache = { content, fetchedAt: Date.now() };
-  return content;
 }
 
 export default async function (pi: any) {
-  // Auto-restore: on new session, scan .pi-board/topics/ for all open topics
-  pi.on("session_start", async (_event: any, _ctx: any) => {
+  pi.on("session_start", async (_event: any, ctx: any) => {
+    participatingTopics.clear();
+    announcedCriticalNotes.clear();
+    frozenReference = null;
+    lastSizeWarningKey = null;
+    lastHealthWarningKey = null;
+    restoreAnnouncedCriticalNotes(ctx);
     try {
-      const topics = listTopics();
-      for (const t of topics) {
-        if (t.status === "open") {
-          participatingTopics.add(t.id);
-        }
+      for (const topic of listTopics()) {
+        if (topic.status === "open") participatingTopics.add(topic.id);
       }
     } catch {
-      // .pi-board not yet created — normal, skip
+      // Board storage may not exist before its first use.
     }
   });
 
-  // Track participation: when agent posts to a topic, record it
-  pi.on("tool_result", async (event: any, _ctx: any) => {
+  pi.on("tool_result", async (event: any) => {
     const toolName = event.tool || event.toolName;
-    if (toolName === "board") {
-      // If the tool call was a "post" or "open", mark participation
-      const input = event.input || event.args || {};
-      if (input.action === "open" || input.action === "post") {
-        if (input.topic) {
-          participatingTopics.add(input.topic);
-        }
-      }
+    if (toolName !== "board") return;
+    const input = event.input || event.args || {};
+    if ((input.action === "open" || input.action === "post") && input.topic) {
+      participatingTopics.add(input.topic);
     }
   });
 
-  // Context injection hook — fires before every LLM call
-  pi.on("context", async (event: any, _ctx: any) => {
-    const injections: string[] = [];
-    const WRAPPER_OVERHEAD = 40; // <context silent="true">\n...\n</context> ≈ 40 bytes
-    let totalBudget = 3000 - WRAPPER_OVERHEAD;
+  pi.on("message_end", async (event: any) => {
+    rememberCriticalMessage(event.message);
+  });
 
-    // 1. Knowledge index (always inject if non-empty)
-    const knowledgeIndex = getKnowledgeIndex();
-    if (knowledgeIndex) {
-      const knowledgeSection = knowledgeIndex;
-      const kBytes = Buffer.byteLength(knowledgeSection, "utf-8");
-      // Knowledge index is always injected — it's the agent's long-term memory directory.
-      // Even at 5KB (~1250 tokens) it's negligible vs any modern context window.
-      injections.push(knowledgeSection);
-      totalBudget -= kBytes;
+  pi.on("before_agent_start", async (event: any, ctx: any) => {
+    const knowledge = buildKnowledgeSnapshot();
+    const board = buildBoardSnapshot(participatingTopics);
+    emitHealthWarning(knowledge.issues);
+
+    // A new user prompt is the sole refresh boundary for passive reference data.
+    frozenReference = freezeReference(pi, event, knowledge, board);
+
+    const newCritical = board.criticalUpdates.filter(update => !announcedCriticalNotes.has(update.key));
+    const criticalContent = newCritical.length > 0 ? formatCriticalMessage(newCritical) : "";
+    const injectedContent = [frozenReference?.content, criticalContent].filter(Boolean).join("\n\n");
+    const criticalBytes = Buffer.byteLength(criticalContent, "utf-8");
+    if (injectedContent) {
+      emitSizeWarning(injectedContent, knowledge.bytes, board.bytes + criticalBytes, ctx);
     }
 
-    // 2. Board digests for participating topics
-    if (participatingTopics.size > 0) {
-      try {
-        const topics = listTopics();
-        const openParticipating = topics.filter(
-          t => t.status === "open" && participatingTopics.has(t.id)
-        );
+    if (newCritical.length === 0) return;
+    return {
+      message: {
+        customType: CRITICAL_MESSAGE_TYPE,
+        content: criticalContent,
+        display: true,
+        details: {
+          sources: newCritical.map(update => `Board ${update.topic}#${update.note.seq}`),
+        },
+      },
+    };
+  });
 
-        const digestStrategy = resolveDigestStrategy();
+  pi.on("context", async (event: any) => {
+    if (!frozenReference || !Array.isArray(event.messages)) return {};
 
-        for (const topic of openParticipating) {
-          if (totalBudget <= 100) break; // Reserve minimum space
-
-          const digest = generateDigest(topic.id, {
-            lastSeq: 0, // Always generate full digest for injection
-            maxBytes: Math.min(totalBudget, 1500), // Cap per-topic
-            strategy: digestStrategy,
-          });
-
-          if (digest.text) {
-            const section = `${topic.id} (${topic.goal}):\n${digest.text}`;
-            injections.push(section);
-            totalBudget -= Buffer.byteLength(section, "utf-8");
-            lastInjectedSeq.set(topic.id, digest.lastSeq);
-          }
-        }
-      } catch {
-        // Board might not exist yet — silently skip
-      }
-    }
-
-    // 3. Inject context by appending to the last user message (not a separate message)
-    // A separate role:"user" message triggers LLM response patterns — appending avoids this.
-    if (injections.length > 0 && event.messages && Array.isArray(event.messages)) {
-      const injectedContent = injections.join("\n\n---\n\n");
-      const contextBlock = `\n\n<!-- pi-harness-ref -->\n${injectedContent}\n<!-- /pi-harness-ref -->`;
-
-      // Find the last user message and append to its content
-      for (let i = event.messages.length - 1; i >= 0; i--) {
-        const msg = event.messages[i];
-        if (msg.role === "user" && Array.isArray(msg.content)) {
-          const lastTextPart = msg.content.findLast((p: any) => p.type === "text");
-          if (lastTextPart) {
-            lastTextPart.text += contextBlock;
-          } else {
-            msg.content.push({ type: "text", text: contextBlock });
-          }
-          break;
-        } else if (msg.role === "user" && typeof msg.content === "string") {
-          msg.content += contextBlock;
-          break;
-        }
-      }
-    }
-
-    // Return modified context (if the API expects a return value)
-    return {};
+    // Context events receive a deep copy. Insert one distinct reference message
+    // immediately before the current real user prompt without mutating its bytes.
+    const messages = event.messages.filter(
+      (message: any) => !(message.role === "custom" && message.customType === REFERENCE_MESSAGE_TYPE),
+    );
+    let insertionIndex = messages.findLastIndex((message: any) => message.role === "user");
+    if (insertionIndex < 0) insertionIndex = messages.length;
+    messages.splice(insertionIndex, 0, referenceMessage(frozenReference));
+    return { messages };
   });
 }

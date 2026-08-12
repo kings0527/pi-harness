@@ -16,12 +16,11 @@ export interface SpawnOptions {
 export interface SpawnResult {
   name: string;
   exitCode: number | null;
-  output: string; // stdout 尾部（截断到合理长度）
+  output: string; // complete stdout + stderr (ADR-0012)
   timedOut: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
-const OUTPUT_TAIL_CHARS = 4000;
 
 function buildPrompt(opts: SpawnOptions): string {
   const topics = listTopics();
@@ -64,9 +63,6 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
     const collect = (chunk: Buffer) => {
       output += chunk.toString();
-      if (output.length > OUTPUT_TAIL_CHARS * 2) {
-        output = output.slice(-OUTPUT_TAIL_CHARS);
-      }
     };
     child.stdout.on("data", collect);
     child.stderr.on("data", collect);
@@ -77,7 +73,7 @@ export function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       resolve({
         name: opts.profile.name,
         exitCode,
-        output: output.slice(-OUTPUT_TAIL_CHARS).trim(),
+        output: output.trim(),
         timedOut,
       });
     };

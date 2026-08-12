@@ -7,15 +7,18 @@ import { join } from "node:path";
 // board/events 的存储根锚定 process.cwd()/.pi-board（core/storage 惰性初始化），
 // 因此在动态 import 前 chdir 到临时目录即可完全隔离，不污染仓库。
 let workDir: string;
+let originalCwd: string;
 let board: typeof import("../core/board/index.ts");
 
 before(async () => {
+  originalCwd = process.cwd();
   workDir = mkdtempSync(join(tmpdir(), "pi-harness-board-test-"));
   process.chdir(workDir);
   board = await import("../core/board/index.ts");
 });
 
 after(() => {
+  process.chdir(originalCwd);
   rmSync(workDir, { recursive: true, force: true });
 });
 
@@ -49,13 +52,19 @@ test("postNote 递增 seq 并持久化 tags/priority，readNotes 支持 since �
   assert.throws(() => board.postNote("t-missing", "x", "y"), /not found/);
 });
 
-test("closeTopic 归档 jsonl 并产出 summary/decisions，重复 close 抛错", () => {
+test("closeTopic 归档完整 notes 并产出 summary/decisions", () => {
   board.openTopic("t-close", "verify close semantics");
-  board.postNote("t-close", "worker", "conclusion", { priority: "critical" });
+  for (let i = 1; i <= 8; i++) {
+    board.postNote("t-close", "worker", `finding-${i}`, i === 8 ? { priority: "critical" } : undefined);
+  }
 
   const { summary, decisions } = board.closeTopic("t-close");
   assert.match(summary, /Summary: t-close/);
-  assert.match(decisions, /conclusion/);
+  assert.match(summary, /finding-1/);
+  assert.match(summary, /finding-4/);
+  assert.match(summary, /finding-8/);
+  assert.match(summary, /Complete Activity/);
+  assert.match(decisions, /finding-8/);
 
   const archiveDir = join(workDir, ".pi-board", "topics", "archive");
   assert.ok(existsSync(join(archiveDir, "t-close.jsonl")), "jsonl 应移入 archive");
@@ -69,7 +78,7 @@ test("closeTopic 归档 jsonl 并产出 summary/decisions，重复 close 抛错"
   const listed = board.listTopics().find(t => t.id === "t-close");
   assert.ok(listed, "listTopics 应包含归档 topic");
   assert.equal(listed.status, "closed");
-  assert.equal(listed.noteCount, 1);
+  assert.equal(listed.noteCount, 8);
 
   // 已归档后原路径不存在，再次 close 报 not found
   assert.throws(() => board.closeTopic("t-close"), /not found/);

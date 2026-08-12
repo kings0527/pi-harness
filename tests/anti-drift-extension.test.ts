@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 let workDir: string;
+let originalCwd: string;
 let handlers: Record<string, Function[]>;
 
 async function fireAsync(event: string, payload: any) {
@@ -47,6 +48,7 @@ function newSession(): string {
 }
 
 before(async () => {
+  originalCwd = process.cwd();
   workDir = mkdtempSync(join(tmpdir(), "pi-harness-anti-drift-test-"));
   process.chdir(workDir);
   handlers = {};
@@ -61,6 +63,7 @@ before(async () => {
 });
 
 after(() => {
+  process.chdir(originalCwd);
   rmSync(workDir, { recursive: true, force: true });
   delete process.env.PI_SESSION_ID;
   delete process.env.PI_ANTIDRIFT_DISABLED;

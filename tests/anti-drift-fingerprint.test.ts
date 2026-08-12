@@ -39,12 +39,12 @@ test("bash: different commands → different fingerprints", () => {
   assert.notEqual(a, b);
 });
 
-test("bash: long commands truncate to 80 chars", () => {
+test("bash: long commands remain distinct after the former 80-char boundary", () => {
   const longA = "a".repeat(200);
   const longB = "a".repeat(200) + "X";
   const a = fingerprint({ tool: "bash", input: { command: longA } });
   const b = fingerprint({ tool: "bash", input: { command: longB } });
-  assert.equal(a, b, "truncation makes them equal");
+  assert.notEqual(a, b, "full normalized commands are hashed");
 });
 
 test("bash: large numeric IDs collapse to N", () => {
@@ -74,6 +74,12 @@ test("unknown tool: stable across identical inputs, distinct across distinct", (
   assert.equal(a, b);
   const c = fingerprint({ tool: "mystery", input: { x: "1", y: "3" } });
   assert.notEqual(a, c);
+});
+
+test("unknown tool hashes every sorted field, not only the first three", () => {
+  const a = fingerprint({ tool: "mystery", input: { a: 1, b: 2, c: 3, d: "left" } });
+  const b = fingerprint({ tool: "mystery", input: { d: "right", c: 3, b: 2, a: 1 } });
+  assert.notEqual(a, b);
 });
 
 test("missing input does not throw and produces a stable fingerprint", () => {

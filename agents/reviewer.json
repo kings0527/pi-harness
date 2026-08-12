@@ -2,6 +2,5 @@
   "name": "reviewer",
   "specialty": ["finding counterexamples", "verifying claims", "risk assessment"],
   "confidence_bias": "avoid guessing; demand evidence",
-  "out_of_scope": ["implementing fixes"],
-  "digestStrategy": "recent-only"
+  "out_of_scope": ["implementing fixes"]
 }

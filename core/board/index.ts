@@ -201,7 +201,7 @@ function generateSummary(topic: Topic, notes: Note[]): string {
   md += `**Participants**: ${[...new Set(notes.map(n => n.author))].join(", ")}\n\n`;
   md += `## Discussion Highlights\n\n`;
 
-  // Include critical notes and last few notes
+  // Pin critical notes, then preserve the complete discussion (ADR-0012).
   const critical = notes.filter(n => n.priority === "critical");
   if (critical.length > 0) {
     md += `### Critical Notes\n\n`;
@@ -211,9 +211,8 @@ function generateSummary(topic: Topic, notes: Note[]): string {
     md += `\n`;
   }
 
-  const recent = notes.slice(-5);
-  md += `### Recent Activity\n\n`;
-  for (const n of recent) {
+  md += `### Complete Activity\n\n`;
+  for (const n of notes) {
     md += `- [#${n.seq}] ${n.author}: ${n.content}\n`;
   }
 

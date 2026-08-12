@@ -5,6 +5,7 @@
 // action. We do NOT inject this into the model context — the LLM is trusted
 // to know what it is doing. Warnings are for the human operator, not the LLM.
 
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 export interface FingerprintInput {
@@ -13,6 +14,22 @@ export interface FingerprintInput {
 }
 
 const SEP = "|";
+
+function hash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, nested]) => [key, stableValue(nested)]),
+    );
+  }
+  return value;
+}
 
 function intentKey(tool: string, input: Record<string, unknown> | undefined): string {
   const i = input ?? {};
@@ -31,7 +48,7 @@ function intentKey(tool: string, input: Record<string, unknown> | undefined): st
         .replace(/\b\d{4,}\b/g, "N")
         .replace(/\s+/g, " ")
         .trim();
-      return `cmd=${collapsed.slice(0, 80)}`;
+      return `cmd-sha256=${hash(collapsed)}`;
     }
     case "edit":
     case "write": {
@@ -45,8 +62,7 @@ function intentKey(tool: string, input: Record<string, unknown> | undefined): st
       return `q=${q};path=${normalizePath(p)}`;
     }
     default: {
-      const keys = Object.keys(i).sort().slice(0, 3);
-      return keys.map(k => `${k}=${String(i[k]).slice(0, 40)}`).join(";");
+      return `input-sha256=${hash(JSON.stringify(stableValue(i)))}`;
     }
   }
 }

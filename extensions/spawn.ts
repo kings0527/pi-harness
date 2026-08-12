@@ -6,12 +6,29 @@ import type { SpawnOptions } from "../core/spawn/index.ts";
 import { listTopics, openTopic, postNote, readNotes, closeTopic } from "../core/board/index.ts";
 import { getStormConfig } from "../core/storm/index.ts";
 import { getPhysarumConfig } from "../core/physarum/index.ts";
+import { assessContextSize } from "../core/context-size/index.ts";
+import { appendEvent } from "../core/events/index.ts";
+
+function warnIfLargeResult(text: string, ctx: any, action: string): void {
+  const contextWindow = ctx?.model?.contextWindow ?? ctx?.getContextUsage?.()?.contextWindow;
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return;
+  const assessment = assessContextSize(text, contextWindow);
+  if (!assessment.shouldWarn) return;
+
+  const message = `Full spawn ${action} output preserved: ~${assessment.estimatedTokens} tokens (${(assessment.ratio * 100).toFixed(1)}% of ${contextWindow}). Review agent output and Board notes for duplication or excessive verbosity.`;
+  console.error(`[spawn] WARN: ${message}`);
+  try {
+    appendEvent("hook_warn", { rule: "spawn-output-size", action, ...assessment, message });
+  } catch {
+    // Warning persistence must not alter the tool result.
+  }
+}
 
 export default async function(pi: any) {
   pi.registerTool({
     name: "spawn",
     label: "Spawn Subagents",
-    description: "Spawn subagents to investigate and post findings to the board. Actions: list, run (parallel agents), debate (storm adversarial), physarum (collective intelligence).",
+    description: "Spawn Board collaborators. Actions: list, run, debate, physarum.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("list"),
@@ -19,14 +36,14 @@ export default async function(pi: any) {
         Type.Literal("debate"),
         Type.Literal("physarum"),
       ]),
-      topic: Type.Optional(Type.String({ description: "Open topic the subagents collaborate on (required for run/debate)" })),
+      topic: Type.Optional(Type.String({ description: "Open Board topic" })),
       agents: Type.Optional(Type.Array(Type.Object({
-        profile: Type.String({ description: "Profile name, e.g. scout / worker / reviewer" }),
-        task: Type.String({ description: "Concrete investigation task for this subagent" }),
-      }), { description: "Subagents to launch in parallel (required for run)" })),
-      question: Type.Optional(Type.String({ description: "The specific question to debate/explore (required for debate/physarum action)" })),
-      angles: Type.Optional(Type.Array(Type.String(), { description: "Exploration angles for each tentacle (optional, physarum action)" })),
-      timeoutMs: Type.Optional(Type.Integer({ description: "Per-agent timeout in ms (default 600000)" })),
+        profile: Type.String({ description: "Agent profile" }),
+        task: Type.String({ description: "Concrete task" }),
+      }), { description: "Parallel agents" })),
+      question: Type.Optional(Type.String({ description: "Debate/exploration question" })),
+      angles: Type.Optional(Type.Array(Type.String(), { description: "Physarum angles" })),
+      timeoutMs: Type.Optional(Type.Integer({ description: "Timeout per agent" })),
     }),
     async execute(toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) {
       try {
@@ -68,7 +85,9 @@ export default async function(pi: any) {
               const status = r.timedOut ? "TIMED OUT" : `exit ${r.exitCode}`;
               return `## ${r.name} (${status})\n${r.output || "(no output)"}`;
             }).join("\n\n");
-            return { content: [{ type: "text" as const, text: `${formatted}\n\n---\nNow \`board read ${params.topic}\` to check convergence — if gaps remain, spawn another round.` }] };
+            const resultText = `${formatted}\n\n---\nNow \`board read ${params.topic}\` to check convergence — if gaps remain, spawn another round.`;
+            warnIfLargeResult(resultText, ctx, "run");
+            return { content: [{ type: "text" as const, text: resultText }] };
           }
           case "debate": {
             if (!params.topic) throw new Error("topic is required for debate");
@@ -146,7 +165,9 @@ export default async function(pi: any) {
               const status = r.timedOut ? "TIMED OUT" : `exit ${r.exitCode}`;
               return `## ${r.name} [${models[i]}] (${status})\n${r.output || "(no output)"}`;
             }).join("\n\n");
-            return { content: [{ type: "text" as const, text: `${debateFormatted}\n\n---\n⚡ Debate round complete (${debateResults.length} participants). Now \`board read ${params.topic}\` to synthesize all positions. Consider: where do they agree? Where is the evidence strongest? What remains unresolved?` }] };
+            const debateText = `${debateFormatted}\n\n---\n⚡ Debate round complete (${debateResults.length} participants). Now \`board read ${params.topic}\` to synthesize all positions. Consider: where do they agree? Where is the evidence strongest? What remains unresolved?`;
+            warnIfLargeResult(debateText, ctx, "debate");
+            return { content: [{ type: "text" as const, text: debateText }] };
           }
           case "physarum": {
             if (!params.topic) throw new Error("topic is required for physarum");
@@ -220,7 +241,7 @@ export default async function(pi: any) {
               const criticalNotes = allNotes.filter((n: any) => n.priority === "critical");
               const synthesisContent = criticalNotes.length > 0
                 ? criticalNotes.map((n: any) => n.content).join("\n\n---\n\n")
-                : allNotes.slice(-tentacleCount).map((n: any) => `${n.author}: ${n.content}`).join("\n\n");
+                : allNotes.map((n: any) => `${n.author}: ${n.content}`).join("\n\n");
 
               // 将综合结论 post 到主 topic
               postNote(params.topic, "physarum", synthesisContent, { tags: ["physarum-synthesis"] });

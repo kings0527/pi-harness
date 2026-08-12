@@ -26,14 +26,16 @@ pi install github:kings0527/pi-harness         # 从 GitHub
 
 ### 知识层：Knowledge + Distill
 
-- **`knowledge/`**：全局知识库（`~/.pi-harness/knowledge/`），markdown 目录树 + `index.md` 索引，跨项目复用的认知资产，运行时自动创建。
+- **分层 knowledge**：`project` 默认写当前子项目 `<project-root>/knowledge/`，`workspace` 写总项目 Git 根 `<workspace-root>/knowledge/`，`global` 写 `~/.pi-harness/knowledge/`。处理 A 时只注入 A + workspace + global，不加载 B/C/D；同根自动去重。读取不建目录，写入时按需创建。
 - **`distill` skill**：topic close 后系统性评估每条发现，够格的蒸馏进知识库。写入走 `board` 工具的 `distill` 动作。
 - **强制溯源**：每条知识条目必须带 `source`（如 `topic-<id>#seq-<N>`），无溯源直接被 runtime 拒绝。
 - **CONFLICT 标记机制**：新知识与旧条目冲突时用 `distill-conflict` 只追加冲突块，永不静默覆盖原内容。
+- **完整上下文**：knowledge index、Board notes 与 subagent 输出保持完整；估算达到当前模型窗口 20% 时仅告警，提示检查过期、错误、重复或过长内容。
+- **稳定且可审计的注入**：reference 每个用户轮次只冻结一次，精确字节写入 `.pi-board/context-snapshots/`；CRITICAL Board note 作为带来源的可见消息进入会话。
 
 ### 哲学层：Discipline + Doctrine
 
-- **6 条元原则** + **协作决策准则**：由 `before_agent_start` hook 常驻注入 systemPrompt（约每会话一次），让"该不该协作"成为 agent 的自触发判断，而非需要用户下令。
+- **7 条元原则** + **协作决策准则**：由 `before_agent_start` hook 为每个用户轮次组装同一套稳定 systemPrompt，让"该不该协作"成为 agent 的自触发判断，而非需要用户下令。
 - **Plan 纪律**：≥3 步的任务先上板贴计划；最新计划每轮自动置顶注入，context 压缩后计划不丢，subagent 也随黑板注入继承计划。
 - **Runtime hooks**（`discipline.ts` / `convergence.ts`）：
   - `read-before-write`：改文件前未读则告警（记事件，不阻断）
@@ -64,12 +66,15 @@ extensions/          ← pi 薄适配层（工具注册 + hooks，唯一接触 p
   board.ts           共享黑板工具
   spawn.ts           多 agent spawn 工具
   storm.ts           /storm 命令注册
-  context-feed.ts    context feed（knowledge index + board digest/plan）
+  context-feed.ts    冻结、审计并注入 knowledge + Board reference
   discipline.ts      纪律 hooks（read-before-write, fail-loud, diff-scope）
   convergence.ts     收敛门禁（close 前置校验 + spawn 轮次护栏）
   doctrine.ts        常驻认知注入（before_agent_start）
 core/                ← 纯 Node.js，runtime 无关（零 pi import）
   board/             黑板逻辑 + digest 生成
+  context-reference/ knowledge/Board 分层选择与 reference 格式化
+  context-size/      上下文体积估算与告警阈值
+  context-snapshot/  注入内容寻址快照
   knowledge/         知识库读写
   identity/          角色卡加载
   spawn/             subagent 启动
@@ -79,12 +84,14 @@ core/                ← 纯 Node.js，runtime 无关（零 pi import）
 skills/distill/      ← 蒸馏工作流 skill
 skills/storm/        ← Storm 辩论 skill（按需加载）
 prompts/             ← 常驻 prompt（meta-principles + collaboration-doctrine）
-knowledge/           ← 全局知识存储（~/.pi-harness/knowledge/，不在仓库内，运行时自动创建）
+knowledge/           ← 当前 project 或共享 workspace 的知识存储
+~/.pi-harness/knowledge/ ← 跨项目知识存储（scope=global）
+handoff/             ← 项目 session handoff 的唯一根
 agents/              ← 角色卡（scout / worker / reviewer / advocate / critic）
 docs/decisions/      ← 架构决策记录（ADR）
 ```
 
-黑板运行时状态落在 `.pi-board/`（topics + `events.jsonl`），可直接 `cat` 检查。
+黑板运行时状态落在 `.pi-board/`（topics + `events.jsonl` + `context-snapshots/`），可直接 `cat` 检查。
 
 ## 设计原则
 
@@ -93,6 +100,7 @@ docs/decisions/      ← 架构决策记录（ADR）
 - **最少工具**：两个工具（board + spawn）覆盖全部协作。
 - **判断归 LLM，约束归代码**：hook 只强制不可违反的硬约束，语义判断留给 LLM。
 - **渐进披露**：工具 description 极小，skill 正文按需加载。
+- **证据完整**：运行时不静默截断诊断与协作内容；体积过大时显式告警并保留原文。
 
 ## ADR（架构决策）
 
@@ -104,6 +112,13 @@ docs/decisions/      ← 架构决策记录（ADR）
 - **0005**: 协作准则常驻 systemPrompt 注入
 - **0006**: Close 收敛门禁
 - **0007**: Storm 辩论回合制
+- **0008**: 修复 skill 死链接
+- **0009**: Anti-drift 仅告警 hook
+- **0010**: Physarum collective intelligence
+- **0011**: Knowledge/handoff 原固定双层放置（knowledge 部分由 0014 取代）
+- **0012**: 完整保留上下文，超量只告警
+- **0013**: 每用户轮次冻结且可审计的 reference 注入
+- **0014**: Monorepo knowledge 固定 project/workspace/global 三层作用域
 
 ## 开发
 

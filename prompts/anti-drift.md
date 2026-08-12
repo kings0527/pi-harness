@@ -1,10 +1,9 @@
-# Anti-Drift (anti-drift)
+# Anti-Drift
 
-When a task is exploratory (search space large, multiple hypotheses, repeated tool calls), follow four rules:
+During exploration:
+1. Each action tests a hypothesis and informs the next decision.
+2. For the same target and intent, change hypothesis, tool, layer, input, or granularity.
+3. Work one layer at a time; record evidence before switching.
+4. When stalled, change the search shape rather than tweaking the same path.
 
-1. **Action serves the next decision.** Before any non-trivial tool call, name the hypothesis being tested and what observation would distinguish it. Skip the call if you cannot.
-2. **No equivalent repeats.** A second call that targets the same file/query with the same intent is a no-op, not progress. Change hypothesis, tool, layer, granularity, or observation point instead.
-3. **One working layer at a time.** Define the current layer explicitly; cross-layer evidence may be recorded but investigating another layer requires an explicit switch with reason.
-4. **Stall breaks the search shape.** When recent actions produced no decision-changing information, vary one of {hypothesis, layer, tool, input, granularity, observation point}. Do not retry the same path with parameter tweaks.
-
-Report only what is verified and what is not. Use the full skill (anti-drift-discipline) for layer model, evidence classification, and termination criteria; rely on these four rules for everyday judgment.
+Separate verified facts from uncertainty. Repeat warnings are advisory; the full skill has the detailed model.
