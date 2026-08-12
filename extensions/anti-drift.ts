@@ -13,6 +13,7 @@
 //   runtime gates. No mode switching. No state injection. No thresholds.
 
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { appendEvent } from "../core/events/index.ts";
 import { fingerprint } from "../core/anti-drift/fingerprint.ts";
@@ -25,8 +26,11 @@ function ensureStateDir(): void {
 }
 
 function sanitizeSessionId(raw: string): string {
-  const safe = raw.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
-  return safe.length > 0 ? safe : "unknown";
+  const safe = raw.replace(/[^a-zA-Z0-9_-]/g, "_");
+  if (safe.length === 0) return "unknown";
+  if (safe.length <= 128) return safe;
+  const suffix = createHash("sha256").update(raw).digest("hex").slice(0, 16);
+  return `${safe.slice(0, 111)}-${suffix}`;
 }
 
 function getSessionId(): string {

@@ -32,10 +32,11 @@ For each finding/decision in the topic, evaluate:
 
 For each candidate that passes Step 2:
 
-0. **Choose the tier (ADR-0011 — fixed placement)**:
-   - `scope=project` (default) → `<project-root>/knowledge/`. Project-specific findings (this repo's bugs, audits, deploys). Travels with the repo.
-   - `scope=global` → `~/.pi-harness/knowledge/`. Cross-project reusable techniques (tool limitations, RE playbooks).
-   - Internal subdirectories are allowed inside both roots. Creating `knowledge/` directories ANYWHERE else in the project tree is FORBIDDEN.
+0. **Choose the tier (ADR-0014 — fixed placement)**:
+   - `scope=project` (default) → `<project-root>/knowledge/` at the pi session root. Use for the active subproject only.
+   - `scope=workspace` → `<workspace-root>/knowledge/` at the nearest Git root. Use only when at least two related subprojects share the conclusion.
+   - `scope=global` → `~/.pi-harness/knowledge/`. Use across unrelated workspaces.
+   - Context loads the active project + workspace + global with root deduplication; sibling projects stay out.
 
 1. **Choose a path** within the chosen root: `{domain}/{subdomain}/{filename}.md`
    - Follow existing structure if the domain already has entries
@@ -43,7 +44,7 @@ For each candidate that passes Step 2:
 
 2. **Write the entry** with mandatory source link (the `board` tool's `distill` action):
    ```
-   board action=distill path=<entry-path> content="<full entry markdown>" source="topic-<id>#seq-<N>,seq-<M>" description="<one-line for index>" scope=project|global
+   board action=distill path=<entry-path> content="<full entry markdown>" source="topic-<id>#seq-<N>,seq-<M>" description="<one-line for index>" scope=project|workspace|global
    ```
    Entries without a `source` are rejected by the runtime.
 
@@ -51,7 +52,7 @@ For each candidate that passes Step 2:
    - DO NOT modify or overwrite the existing entry
    - Instead, mark it as CONFLICT (the `board` tool's `distill-conflict` action — it only appends a CONFLICT block, never rewrites):
    ```
-   board action=distill-conflict path=<existing-path> source="topic-<id>#seq-<N>" description="<what contradicts>" scope=project|global
+   board action=distill-conflict path=<existing-path> source="topic-<id>#seq-<N>" description="<what contradicts>" scope=project|workspace|global
    ```
    - Then add the new finding as a separate entry (`action=distill` with a different path)
 
@@ -63,7 +64,7 @@ The `distill` action automatically updates `index.md` in the chosen root. Verify
 
 1. **溯源 (Traceability) is mandatory**: Every entry MUST include `来源: topic-<id>#seq-<N>` linking back to the original evidence. Entries without source links are REJECTED.
 
-2. **Fixed placement (ADR-0011)**: Project knowledge lives ONLY at `<project-root>/knowledge/`; cross-project knowledge ONLY at `~/.pi-harness/knowledge/`; handoffs ONLY at `<project-root>/handoff/`. Internal subfolders are fine — any other location is forbidden.
+2. **Fixed placement (ADR-0014)**: Subproject knowledge uses `project`, related-repo knowledge uses `workspace`, unrelated cross-repo knowledge uses `global`; handoffs stay at `<project-root>/handoff/`.
 
 3. **NEVER silently overwrite**: When new knowledge contradicts existing entries, ALWAYS mark the conflict explicitly. Use the CONFLICT workflow above.
 

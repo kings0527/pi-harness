@@ -35,12 +35,13 @@ For each cluster with ≥2 occurrences, ask:
 
 ### Step 4: Distill into Knowledge
 
-For actionable patterns, create entries in `knowledge/failures/`:
-- Path: `knowledge/failures/<pattern-name>.md`
+For actionable project patterns, use the project knowledge tier:
+- Path: `failures/<pattern-name>.md`
+- Scope: `project` for one component, `workspace` for related components, `global` across repositories
 - Content: description + root cause + mitigation
 - Source: `events.jsonl entries at timestamps X, Y, Z`
 
-Use `board` tool with `action=distill` to persist.
+Use `board` with `action=distill`, the relative path above, and the selected scope.
 
 ## When to Use
 

@@ -6,7 +6,7 @@
 - `extensions/` — Thin adapter layer. ONLY place that touches pi Extension API (`pi.on()`, `pi.registerTool()`).
 - `skills/` — Markdown workflow guides (SKILL.md with YAML frontmatter). Loaded by pi on demand.
 - `prompts/` — Constant prompt templates injected into systemPrompt via `extensions/doctrine.ts`.
-- `knowledge/` — Long-term memory store, two fixed tiers (ADR-0011): project-level at `<project-root>/knowledge/` (in repo, default), cross-project at `~/.pi-harness/knowledge/`. Auto-created on write only.
+- `knowledge/` — Long-term memory in three fixed tiers (ADR-0014): current subproject at `<project-root>/knowledge/` (default), shared repo at `<workspace-root>/knowledge/`, cross-workspace at `~/.pi-harness/knowledge/`. Auto-created on write only.
 - `handoff/` — Session handoffs live at `<project-root>/handoff/` only.
 - `agents/` — Role cards (JSON) for spawn subagents.
 
@@ -14,11 +14,15 @@
 
 1. `grep -r "@earendil" core/` MUST return empty — core has no pi dependency.
 2. Total constant token injection (meta-principles + doctrine + tool descriptions) MUST stay < 1000 tokens.
-   Current evidence: meta-principles 124 + collaboration-doctrine 401 + anti-drift 166 ≈ 691 words (~900 tokens) — under cap.
-3. Context feed budget: ≤ 3000 bytes per turn (managed in `extensions/context-feed.ts`).
+   Current full-corpus proxy: 369 words / 2633 UTF-8 bytes, conservative estimate ≤878 tokens.
+3. Context is never silently truncated. Full knowledge indexes and participating Board notes are injected;
+   at an estimated 20% of the active model window, runtime emits one warning and preserves all content (ADR-0012).
+   Passive references freeze per user turn and exact bytes persist in `.pi-board/context-snapshots/`; CRITICAL notes
+   become visible, provenance-bearing messages instead of hidden references (ADR-0013).
 4. Board storage: `.pi-board/` (project-local, append-only JSONL + markdown snapshots).
-5. Fixed placement (ADR-0011): project knowledge ONLY at `<project-root>/knowledge/`, handoffs ONLY at
-   `<project-root>/handoff/`. Internal subdirectories allowed in both; any other location is forbidden.
+5. Fixed placement (ADR-0014): project knowledge ONLY at the pi session root, workspace knowledge ONLY at the
+   nearest Git root, global knowledge ONLY under `~/.pi-harness/`; context deduplicates identical roots and never
+   scans sibling subprojects. Handoffs stay at the session project root. Paths may not escape or traverse symlinks.
 6. All architectural decisions documented in `docs/decisions/` (10-line ADR format).
 7. Anti-drift discipline is enforced by `extensions/anti-drift.ts` at runtime. The hook ONLY warns on
    tool calls identical to the immediately previous one (operator-visible via stderr + events.jsonl).
@@ -41,13 +45,14 @@ pi -p --approve "<prompt>"  # Non-interactive test run
 - New tool → Single tool with action parameter preferred (HANDOFF §2.6: "最少工具")
 - New skill → `skills/<name>/SKILL.md` with YAML frontmatter `description` field
 - New knowledge entry → MUST include `来源: <source-link>` (traceability enforced by code);
-  scope=project (default) writes `<project-root>/knowledge/`, scope=global writes `~/.pi-harness/knowledge/`
+  scope=project writes current subproject, scope=workspace writes the shared Git root, scope=global writes home
 
 ## Do NOT
 
 - Modify `HANDOFF.md` (read-only design authority)
 - Import `@earendil-works/*` in `core/` (runtime-agnostic boundary)
-- Create `knowledge/` or `handoff/` directories anywhere except the project root (ADR-0011)
+- Create knowledge/handoff stores outside ADR-0014's selected fixed roots
+- Silently truncate knowledge, Board notes, archived summaries, subagent output, or diagnostic evidence (ADR-0012)
 - Push constant token injection above 1000 tokens total
 - Add embeddings, vector DB, or auto-memory systems (ADR-0002)
 - Bundle third-party pi packages (ADR-0000)

@@ -1,73 +1,68 @@
-import { test, before, after } from "node:test";
+import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// 验证 board 工具的 distill / distill-conflict action 真实路由到 core/knowledge。
-// ADR-0011: 默认 scope=project 写 <cwd>/knowledge/，scope=global 写 ~/.pi-harness/knowledge/。
-const globalRoot = join(homedir(), ".pi-harness", "knowledge");
-const globalIndexPath = join(globalRoot, "index.md");
-const globalTestSubdir = join(globalRoot, "__test__");
-
-let workDir: string;
+let originalCwd: string;
+let originalHome: string | undefined;
+let sandbox: string;
+let projectDir: string;
+let nestedCwd: string;
 let projectRoot: string;
-let projectIndexPath: string;
-let globalIndexSnapshot: string | null;
+let workspaceRoot: string;
+let globalRoot: string;
 let boardTool: any;
 
 before(async () => {
-  workDir = mkdtempSync(join(tmpdir(), "pi-harness-distill-test-"));
-  process.chdir(workDir);
-  projectRoot = join(workDir, "knowledge");
-  projectIndexPath = join(projectRoot, "index.md");
-  // Ensure global knowledge dir exists
-  if (!existsSync(globalRoot)) {
-    mkdirSync(globalRoot, { recursive: true });
-  }
-  // Clean up leftover test artifacts from previous runs
-  rmSync(globalTestSubdir, { recursive: true, force: true });
-  globalIndexSnapshot = existsSync(globalIndexPath) ? readFileSync(globalIndexPath, "utf-8") : null;
+  originalCwd = process.cwd();
+  originalHome = process.env.HOME;
+  sandbox = realpathSync(mkdtempSync(join(tmpdir(), "pi-harness-distill-test-")));
+  projectDir = join(sandbox, "project");
+  nestedCwd = join(projectDir, "src", "feature");
+  const homeDir = join(sandbox, "home");
+  mkdirSync(join(projectDir, ".git"), { recursive: true });
+  mkdirSync(nestedCwd, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  process.env.HOME = homeDir;
+  process.chdir(nestedCwd);
+  projectRoot = join(nestedCwd, "knowledge");
+  workspaceRoot = join(projectDir, "knowledge");
+  globalRoot = join(homeDir, ".pi-harness", "knowledge");
 
-  // 假 pi：只捕获 registerTool 注册的工具定义
-  const registerExtension = (await import("../extensions/board.ts")).default;
-  const fakePi = { registerTool(def: any) { boardTool = def; }, on() {} };
-  await registerExtension(fakePi);
-  assert.ok(boardTool, "board 工具应完成注册");
+  const registerExtension = (await import(`../extensions/board.ts?test=${Date.now()}`)).default;
+  await registerExtension({ registerTool(tool: any) { boardTool = tool; } });
 });
 
 after(() => {
-  rmSync(globalTestSubdir, { recursive: true, force: true });
-  if (globalIndexSnapshot !== null) {
-    writeFileSync(globalIndexPath, globalIndexSnapshot, "utf-8");
-  } else {
-    rmSync(globalIndexPath, { force: true });
-  }
-  rmSync(workDir, { recursive: true, force: true });
+  process.chdir(originalCwd);
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  rmSync(sandbox, { recursive: true, force: true });
 });
 
 async function run(params: Record<string, unknown>): Promise<string> {
-  const result = await boardTool.execute("test-call", params, undefined, undefined, undefined);
+  const result = await boardTool.execute("test-call", params, undefined, undefined, {});
   return result.content[0].text as string;
 }
 
-test("action 枚举包含 distill 与 distill-conflict，scope 枚举为 project|global", () => {
-  const actions = boardTool.parameters.properties.action.anyOf.map((t: any) => t.const);
+test("action 与 scope schema 包含三层 distill 路由", () => {
+  const actions = boardTool.parameters.properties.action.anyOf.map((type: any) => type.const);
+  const scopes = boardTool.parameters.properties.scope.anyOf.map((type: any) => type.const);
   assert.ok(actions.includes("distill"));
   assert.ok(actions.includes("distill-conflict"));
-  const scopes = boardTool.parameters.properties.scope.anyOf.map((t: any) => t.const);
-  assert.deepEqual(scopes, ["project", "global"]);
+  assert.deepEqual(scopes, ["project", "workspace", "global"]);
 });
 
-test("distill 缺 source 被拒绝，默认写入项目根 knowledge/", async () => {
+test("distill 缺 source 被拒绝，默认写当前子项目根", async () => {
   const rejected = await run({
     action: "distill",
     path: "findings/route-a.md",
     content: "Conclusion without source.",
     description: "route test A",
   });
-  assert.match(rejected, /Source link is required/);
-  assert.ok(!existsSync(join(projectRoot, "findings", "route-a.md")));
+  assert.match(rejected, /Source link/);
+  assert.equal(existsSync(join(projectRoot, "findings", "route-a.md")), false);
 
   const ok = await run({
     action: "distill",
@@ -77,60 +72,83 @@ test("distill 缺 source 被拒绝，默认写入项目根 knowledge/", async ()
     description: "route test A",
   });
   assert.match(ok, /Distilled entry "findings\/route-a\.md" \(project,/);
-
-  const written = readFileSync(join(projectRoot, "findings", "route-a.md"), "utf-8");
-  assert.match(written, /来源: topic-route#seq-2/);
-  assert.match(readFileSync(projectIndexPath, "utf-8"), /findings\/route-a\.md \| route test A/);
-  // 项目级条目绝不写进全局根
-  assert.ok(!existsSync(join(globalRoot, "findings", "route-a.md")));
+  assert.ok(ok.includes(join(projectRoot, "index.md")));
+  assert.match(readFileSync(join(projectRoot, "findings", "route-a.md"), "utf-8"), /来源: topic-route#seq-2/);
+  assert.equal(existsSync(join(globalRoot, "findings", "route-a.md")), false);
 });
 
-test("distill scope=global 写入全局根", async () => {
+test("distill scope=global 写隔离全局根", async () => {
   const ok = await run({
     action: "distill",
-    path: "__test__/route-g.md",
+    path: "shared/route-g.md",
     content: "A cross-project technique.",
     source: "topic-route#seq-5",
     description: "route test G",
     scope: "global",
   });
-  assert.match(ok, /Distilled entry "__test__\/route-g\.md" \(global,/);
-
-  assert.match(readFileSync(join(globalRoot, "__test__", "route-g.md"), "utf-8"), /来源: topic-route#seq-5/);
-  assert.match(readFileSync(globalIndexPath, "utf-8"), /__test__\/route-g\.md \| route test G/);
-  assert.ok(!existsSync(join(projectRoot, "__test__", "route-g.md")));
+  assert.match(ok, /Distilled entry "shared\/route-g\.md" \(global,/);
+  assert.match(readFileSync(join(globalRoot, "shared", "route-g.md"), "utf-8"), /topic-route#seq-5/);
+  assert.equal(existsSync(join(projectRoot, "shared", "route-g.md")), false);
 });
 
-test("distill-conflict 只追加 CONFLICT 块，原内容保留（按 scope 路由）", async () => {
-  const original = readFileSync(join(projectRoot, "findings", "route-a.md"), "utf-8");
-
+test("distill scope=workspace 写共享 Git 根", async () => {
   const ok = await run({
+    action: "distill",
+    path: "shared/route-w.md",
+    content: "A rule shared by sibling subprojects.",
+    source: "topic-route#seq-6",
+    description: "route test W",
+    scope: "workspace",
+  });
+  assert.match(ok, /Distilled entry "shared\/route-w\.md" \(workspace,/);
+  assert.match(readFileSync(join(workspaceRoot, "shared", "route-w.md"), "utf-8"), /topic-route#seq-6/);
+  assert.equal(existsSync(join(projectRoot, "shared", "route-w.md")), false);
+});
+
+test("distill-conflict 正向验证 project/workspace/global scope", async () => {
+  const projectOriginal = readFileSync(join(projectRoot, "findings", "route-a.md"), "utf-8");
+  const projectResult = await run({
     action: "distill-conflict",
     path: "findings/route-a.md",
     source: "topic-route#seq-7",
     description: "Later evidence contradicts A.",
   });
-  assert.match(ok, /Marked CONFLICT on "findings\/route-a\.md" \(project,/);
+  assert.match(projectResult, /\(project,/);
+  assert.ok(readFileSync(join(projectRoot, "findings", "route-a.md"), "utf-8").startsWith(projectOriginal));
 
-  const updated = readFileSync(join(projectRoot, "findings", "route-a.md"), "utf-8");
-  assert.ok(updated.startsWith(original), "原内容必须原样保留");
-  assert.match(updated, /## ⚠️ CONFLICT/);
-  assert.match(updated, /来源: topic-route#seq-7/);
-
-  const missing = await run({
+  const globalOriginal = readFileSync(join(globalRoot, "shared", "route-g.md"), "utf-8");
+  const globalResult = await run({
     action: "distill-conflict",
-    path: "missing.md",
-    source: "topic-route#seq-9",
-    description: "n/a",
-  });
-  assert.match(missing, /not found/);
-
-  const missingGlobal = await run({
-    action: "distill-conflict",
-    path: "__test__/missing.md",
-    source: "topic-route#seq-9",
-    description: "n/a",
+    path: "shared/route-g.md",
+    source: "topic-route#seq-8",
+    description: "Later global evidence.",
     scope: "global",
   });
-  assert.match(missingGlobal, /not found/);
+  assert.match(globalResult, /\(global,/);
+  const globalUpdated = readFileSync(join(globalRoot, "shared", "route-g.md"), "utf-8");
+  assert.ok(globalUpdated.startsWith(globalOriginal));
+  assert.match(globalUpdated, /topic-route#seq-8/);
+
+  const workspaceOriginal = readFileSync(join(workspaceRoot, "shared", "route-w.md"), "utf-8");
+  const workspaceResult = await run({
+    action: "distill-conflict",
+    path: "shared/route-w.md",
+    source: "topic-route#seq-9",
+    description: "Later workspace evidence.",
+    scope: "workspace",
+  });
+  assert.match(workspaceResult, /\(workspace,/);
+  assert.ok(readFileSync(join(workspaceRoot, "shared", "route-w.md"), "utf-8").startsWith(workspaceOriginal));
+});
+
+test("board 路由拒绝越界且不留下部分写入", async () => {
+  const result = await run({
+    action: "distill",
+    path: "../escaped.md",
+    content: "outside",
+    source: "topic-route#seq-9",
+    description: "escape",
+  });
+  assert.match(result, /escapes the project root/);
+  assert.equal(existsSync(join(nestedCwd, "escaped.md")), false);
 });

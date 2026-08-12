@@ -9,7 +9,7 @@ export interface AgentProfile {
   interactionMode?: "collaborate" | "debate" | "explore"; // debate = adversarial dialectic, explore = physarum collective
 }
 
-// Agents root is relative to package root (same resolution as core/knowledge)
+// Role cards are package-owned assets, unlike project/workspace/global runtime knowledge.
 function getAgentsRoot(): string {
   // Package root: parent of core/
   return join(import.meta.dirname || __dirname, "..", "..", "agents");
