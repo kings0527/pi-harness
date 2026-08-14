@@ -163,6 +163,13 @@ test("会话位于 workspace 根时 project/workspace index 同根去重", async
     const snapshot = contextReference.buildKnowledgeSnapshot();
     assert.match(snapshot.content, /knowledge\(project\+workspace:/);
     assert.equal(snapshot.content.match(/shared\/workspace-rule\.md/g)?.length, 1);
+    const catalog = snapshot.content.split("\n\n", 1)[0];
+    const sharedIndexPath = join(projectDir, "knowledge", "index.md");
+    const sharedAreasPath = `${join(projectDir, "KNOWLEDGE.md")}#Areas`;
+    assert.match(catalog, /project\+workspace-index:/);
+    assert.match(catalog, /project\+workspace-areas:/);
+    assert.equal(catalog.split(sharedIndexPath).length - 1, 1);
+    assert.equal(catalog.split(sharedAreasPath).length - 1, 1);
   } finally {
     process.chdir(nestedCwd);
   }

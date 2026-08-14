@@ -18,6 +18,7 @@ let sandbox: string;
 let workspaceDir: string;
 let projectDir: string;
 let projectKnowledgeRoot: string;
+let featureDir: string;
 let handlers: Record<string, Array<(...args: any[]) => any>>;
 let sessionEntries: Array<{ type: string; data: any }>;
 let contextEntries: any[];
@@ -29,10 +30,18 @@ before(async () => {
   sandbox = realpathSync(mkdtempSync(join(tmpdir(), "pi-harness-context-feed-test-")));
   workspaceDir = join(sandbox, "exp");
   projectDir = join(workspaceDir, "a");
+  featureDir = join(projectDir, "src", "feature");
   const home = join(sandbox, "home");
   mkdirSync(join(workspaceDir, ".git"), { recursive: true });
-  mkdirSync(projectDir, { recursive: true });
+  mkdirSync(featureDir, { recursive: true });
   mkdirSync(home, { recursive: true });
+  writeFileSync(
+    join(workspaceDir, "KNOWLEDGE.md"),
+    "## Areas\n- a/src/feature/KNOWLEDGE.md | feature guidance\n",
+    "utf-8",
+  );
+  writeFileSync(join(featureDir, "KNOWLEDGE.md"), "LAZY-SCOPE-MARKER\n", "utf-8");
+  writeFileSync(join(featureDir, "index.ts"), "export {};\n", "utf-8");
   process.env.HOME = home;
   process.chdir(projectDir);
   projectKnowledgeRoot = join(projectDir, "knowledge");
@@ -161,6 +170,10 @@ test("按 project + workspace + global 分层注入，不扫描兄弟项目", as
 
   const reference = referenceMessage.content as string;
   assert.match(reference, /reference_context/);
+  assert.match(reference, /knowledge-catalog:/);
+  assert.match(reference, /a\/src\/feature\/KNOWLEDGE\.md \| feature guidance/);
+  assert.match(reference, /Indexes and Areas are locators/);
+  assert.doesNotMatch(reference, /LAZY-SCOPE-MARKER/);
   assert.match(reference, /knowledge\(project:/);
   assert.match(reference, /knowledge\(workspace:/);
   assert.match(reference, /knowledge\(global:/);
@@ -255,6 +268,20 @@ test("过期 index 行触发健康提醒但不自动删除", async () => {
   writeFileSync(indexPath, beforeText, "utf-8");
 });
 
+test("文件访问后在下一轮披露最近的目录级 knowledge 正文", async () => {
+  await fire(
+    "tool_call",
+    { tool: "read", input: { path: join(featureDir, "index.ts") } },
+    runtimeContext(1_000_000),
+  );
+
+  const results = await startTurn("scope activated");
+  const reference = messageOf(results, "pi-harness-reference");
+  assert.ok(reference);
+  assert.match(reference.content, /scope\(a\/src\/feature\):/);
+  assert.match(reference.content, /LAZY-SCOPE-MARKER/);
+});
+
 test("session resume 从持久消息恢复 CRITICAL 已读集合", async () => {
   await fire(
     "session_start",
@@ -264,4 +291,9 @@ test("session resume 从持久消息恢复 CRITICAL 已读集合", async () => {
 
   const results = await startTurn("resumed");
   assert.equal(messageOf(results, "pi-harness-board-critical"), undefined);
+  const reference = messageOf(results, "pi-harness-reference");
+  assert.ok(reference);
+  assert.match(reference.content, /knowledge-catalog:/);
+  assert.match(reference.content, /a\/src\/feature\/KNOWLEDGE\.md \| feature guidance/);
+  assert.doesNotMatch(reference.content, /LAZY-SCOPE-MARKER/);
 });

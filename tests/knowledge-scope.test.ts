@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -74,6 +75,44 @@ test("findKnowledgeScope 文件在 workspace 外返回 null", () => {
   assert.equal(result, null);
 });
 
+test("findKnowledgeScope 拒绝同前缀兄弟目录并以 workspaceRoot 解析相对路径", () => {
+  const prefixedSibling = `${workspaceRoot}-other`;
+  mkdirSync(prefixedSibling, { recursive: true });
+  writeFileSync(join(prefixedSibling, "KNOWLEDGE.md"), "outside scope\n", "utf-8");
+
+  assert.equal(
+    scope.findKnowledgeScope(join(prefixedSibling, "file.ts"), workspaceRoot),
+    null,
+  );
+  assert.equal(
+    scope.findKnowledgeScope("src/auth/login.ts", workspaceRoot),
+    join(workspaceRoot, "src", "auth"),
+  );
+});
+
+test("findKnowledgeScope 与 readScope 拒绝 symlink scope 路径和正文", () => {
+  const outsideDir = join(sandbox, "outside-linked-scope");
+  mkdirSync(outsideDir, { recursive: true });
+  writeFileSync(join(outsideDir, "KNOWLEDGE.md"), "outside linked scope\n", "utf-8");
+  const linkedDir = join(workspaceRoot, "linked-outside");
+  symlinkSync(outsideDir, linkedDir, "dir");
+  const cache = new Map<string, import("../core/knowledge/scope.ts").ScopeEntry>();
+
+  assert.equal(
+    scope.findKnowledgeScope(join(linkedDir, "file.ts"), workspaceRoot),
+    null,
+  );
+  assert.equal(scope.readScope(linkedDir, cache), null);
+  assert.equal(scope.readScope(linkedDir, cache, workspaceRoot), null);
+  assert.equal(scope.discoverScopes(linkedDir).size, 0);
+
+  const linkedFileDir = join(workspaceRoot, "src", "linked-file-scope");
+  mkdirSync(linkedFileDir, { recursive: true });
+  symlinkSync(join(outsideDir, "KNOWLEDGE.md"), join(linkedFileDir, "KNOWLEDGE.md"));
+  assert.equal(scope.readScope(linkedFileDir, cache), null);
+  assert.ok(!scope.discoverScopes(workspaceRoot).has(linkedFileDir));
+});
+
 test("discoverScopes 递归发现所有 KNOWLEDGE.md，跳过 node_modules 和 .git", () => {
   const discovered = scope.discoverScopes(workspaceRoot);
   const dirs = [...discovered.keys()];
@@ -98,6 +137,51 @@ test("discoverScopes 受 maxDepth 限制", () => {
 
   const deep = scope.discoverScopes(workspaceRoot, 8);
   assert.ok(deep.has(deepDir), "depth=8 should reach 5-level deep");
+});
+
+test("discoverScopes 超过 maxDirs 后全局终止且只告警一次", () => {
+  const budgetRoot = join(sandbox, "budget-workspace");
+  mkdirSync(budgetRoot, { recursive: true });
+  writeFileSync(join(budgetRoot, "KNOWLEDGE.md"), "root scope\n", "utf-8");
+  for (let index = 0; index < 10; index += 1) {
+    const dir = join(budgetRoot, `scope-${index}`);
+    mkdirSync(dir);
+    writeFileSync(join(dir, "KNOWLEDGE.md"), `scope ${index}\n`, "utf-8");
+  }
+
+  const errors: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: any[]) => errors.push(args.join(" "));
+  try {
+    const discovered = scope.discoverScopes(budgetRoot, 8, 2);
+    assert.equal(discovered.size, 2, "root and only one child may be visited");
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.deepEqual(errors, [
+    "[knowledge/scope] WARN: discoverScopes exceeded 2 directories, stopping scan",
+  ]);
+});
+
+test("discoverScopes 正常规模不告警且不遍历目录符号链接", () => {
+  const outside = join(sandbox, "outside-scope");
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "KNOWLEDGE.md"), "outside scope\n", "utf-8");
+  symlinkSync(outside, join(workspaceRoot, "linked-scope"), "dir");
+
+  const errors: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: any[]) => errors.push(args.join(" "));
+  let discovered: Map<string, import("../core/knowledge/scope.ts").ScopeEntry>;
+  try {
+    discovered = scope.discoverScopes(workspaceRoot, 8, 1000);
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(errors.length, 0);
+  assert.ok(!discovered.has(join(workspaceRoot, "linked-scope")));
 });
 
 test("readScope 从缓存返回相同 mtime 的条目", () => {

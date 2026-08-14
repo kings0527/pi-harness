@@ -12,7 +12,7 @@ import {
 import { assessContextSize } from "../core/context-size/index.ts";
 import { writeContextSnapshot } from "../core/context-snapshot/index.ts";
 import { appendEvent } from "../core/events/index.ts";
-import { discoverScopes, findKnowledgeScope, type ScopeEntry } from "../core/knowledge/scope.ts";
+import { findKnowledgeScope } from "../core/knowledge/scope.ts";
 
 const REFERENCE_MESSAGE_TYPE = "pi-harness-reference";
 const CRITICAL_MESSAGE_TYPE = "pi-harness-board-critical";
@@ -20,7 +20,6 @@ const participatingTopics = new Set<string>();
 const announcedCriticalNotes = new Set<string>();
 const activeKnowledgeScopes = new Set<string>();
 const pendingCriticalBySession = new Map<string, CriticalUpdate[]>();
-let scopeCache: Map<string, ScopeEntry> = new Map();
 let lastSizeWarningKey: string | null = null;
 let lastHealthWarningKey: string | null = null;
 
@@ -236,11 +235,6 @@ export default async function (pi: any) {
     lastSizeWarningKey = null;
     lastHealthWarningKey = null;
     restoreAnnouncedCriticalNotes(ctx);
-    try {
-      scopeCache = discoverScopes(process.cwd(), 8);
-    } catch {
-      scopeCache = new Map();
-    }
     try {
       for (const topic of listTopics()) {
         if (topic.status === "open") participatingTopics.add(topic.id);

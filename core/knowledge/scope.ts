@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { lstatSync, readFileSync, readdirSync, type Dirent, type Stats } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface ScopeEntry {
   dir: string;
@@ -18,15 +18,52 @@ const SKIP_DIRS = new Set([
   "vendor",
 ]);
 
+function knowledgeFileStat(dir: string): Stats | null {
+  try {
+    const stat = lstatSync(join(dir, "KNOWLEDGE.md"));
+    return stat.isFile() && !stat.isSymbolicLink() ? stat : null;
+  } catch {
+    return null;
+  }
+}
+
+function traversesSymlink(root: string, target: string): boolean {
+  let current = root;
+  const components = relative(root, target).split(sep).filter(Boolean);
+  for (const component of ["", ...components]) {
+    if (component) current = join(current, component);
+    try {
+      if (lstatSync(current).isSymbolicLink()) return true;
+    } catch (error: any) {
+      if (error?.code === "ENOENT") return false;
+      return true;
+    }
+  }
+  return false;
+}
+
+function isWithin(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  return rel === "" || !(rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel));
+}
+
+function isSafeScopePath(root: string, target: string): boolean {
+  return isWithin(root, target) && !traversesSymlink(root, target);
+}
+
 /**
  * From filePath walk up toward workspaceRoot, returning the nearest directory
  * that contains a KNOWLEDGE.md, or null if none found before reaching the root.
  */
 export function findKnowledgeScope(filePath: string, workspaceRoot: string): string | null {
-  let dir = dirname(resolve(filePath));
   const root = resolve(workspaceRoot);
-  while (dir.startsWith(root)) {
-    if (existsSync(join(dir, "KNOWLEDGE.md"))) return dir;
+  const target = isAbsolute(filePath) ? resolve(filePath) : resolve(root, filePath);
+  let dir = dirname(target);
+  if (!isSafeScopePath(root, target) || !isWithin(root, dir)) return null;
+
+  while (true) {
+    if (knowledgeFileStat(dir)) return dir;
+    if (dir === root) break;
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
@@ -36,41 +73,64 @@ export function findKnowledgeScope(filePath: string, workspaceRoot: string): str
 
 /**
  * Recursively scan workspace for all KNOWLEDGE.md files, skipping SKIP_DIRS,
- * bounded by maxDepth. Returns a Map keyed by directory path.
+ * bounded by maxDepth and maxDirs. Intended for explicit catalog repair, not
+ * session startup. Returns a Map keyed by directory path.
  */
-export function discoverScopes(workspaceRoot: string, maxDepth = 8): Map<string, ScopeEntry> {
+export function discoverScopes(
+  workspaceRoot: string,
+  maxDepth = 8,
+  maxDirs = 1000,
+): Map<string, ScopeEntry> {
   const result = new Map<string, ScopeEntry>();
   const root = resolve(workspaceRoot);
+  let visited = 0;
+  let stopped = false;
+
+  // A caller-selected root is trusted as the boundary, but the root itself may
+  // not be a symlink. Descendants are inspected as Dirents and symlinks are not
+  // followed.
+  if (traversesSymlink(root, root)) return result;
+
+  function stopAtBudget(): void {
+    if (stopped) return;
+    stopped = true;
+    console.error(
+      `[knowledge/scope] WARN: discoverScopes exceeded ${maxDirs} directories, stopping scan`,
+    );
+  }
 
   function walk(dir: string, depth: number): void {
-    if (depth > maxDepth) return;
-    const knowledgePath = join(dir, "KNOWLEDGE.md");
-    if (existsSync(knowledgePath)) {
+    if (stopped || depth > maxDepth) return;
+    if (visited >= maxDirs) {
+      stopAtBudget();
+      return;
+    }
+    visited += 1;
+
+    const stat = knowledgeFileStat(dir);
+    if (stat) {
       try {
-        const stat = statSync(knowledgePath);
         result.set(dir, {
           dir,
-          content: readFileSync(knowledgePath, "utf-8").trim(),
+          content: readFileSync(join(dir, "KNOWLEDGE.md"), "utf-8").trim(),
           mtimeMs: stat.mtimeMs,
         });
       } catch {
         // Skip unreadable files.
       }
     }
-    let entries: string[];
+    if (depth === maxDepth) return;
+
+    let entries: Dirent[];
     try {
-      entries = readdirSync(dir);
+      entries = readdirSync(dir, { withFileTypes: true });
     } catch {
       return;
     }
     for (const entry of entries) {
-      if (SKIP_DIRS.has(entry) || entry.startsWith(".")) continue;
-      const child = join(dir, entry);
-      try {
-        if (statSync(child).isDirectory()) walk(child, depth + 1);
-      } catch {
-        // Skip inaccessible entries.
-      }
+      if (stopped) break;
+      if (SKIP_DIRS.has(entry.name) || entry.name.startsWith(".")) continue;
+      if (entry.isDirectory()) walk(join(dir, entry.name), depth + 1);
     }
   }
 
@@ -82,21 +142,24 @@ export function discoverScopes(workspaceRoot: string, maxDepth = 8): Map<string,
  * Read the KNOWLEDGE.md in a directory. If it exists in the cache with a matching
  * mtime, returns the cached entry. Otherwise re-reads and updates the cache.
  */
-export function readScope(dir: string, cache: Map<string, ScopeEntry>): ScopeEntry | null {
-  const knowledgePath = join(dir, "KNOWLEDGE.md");
-  if (!existsSync(knowledgePath)) return null;
-  let stat: ReturnType<typeof statSync>;
-  try {
-    stat = statSync(knowledgePath);
-  } catch {
-    return null;
-  }
-  const cached = cache.get(dir);
+export function readScope(
+  dir: string,
+  cache: Map<string, ScopeEntry>,
+  scopeRoot: string = dir,
+): ScopeEntry | null {
+  const normalizedDir = resolve(dir);
+  const root = resolve(scopeRoot);
+  if (!isSafeScopePath(root, normalizedDir)) return null;
+
+  const knowledgePath = join(normalizedDir, "KNOWLEDGE.md");
+  const stat = knowledgeFileStat(normalizedDir);
+  if (!stat) return null;
+  const cached = cache.get(normalizedDir);
   if (cached && cached.mtimeMs === stat.mtimeMs) return cached;
   try {
     const content = readFileSync(knowledgePath, "utf-8").trim();
-    const entry: ScopeEntry = { dir, content, mtimeMs: stat.mtimeMs };
-    cache.set(dir, entry);
+    const entry: ScopeEntry = { dir: normalizedDir, content, mtimeMs: stat.mtimeMs };
+    cache.set(normalizedDir, entry);
     return entry;
   } catch {
     return null;

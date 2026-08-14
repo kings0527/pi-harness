@@ -94,6 +94,12 @@ docs/decisions/      ← 架构决策记录（ADR）
 
 黑板运行时状态落在 `.pi-board/`（topics + `events.jsonl` + `context-snapshots/`），可直接 `cat` 检查。
 
+### Knowledge 渐进披露
+
+- 每轮 reference 常驻 project/workspace/global `index.md` 路径与完整索引行；index 是导航 catalog，不是正文。
+- project/workspace 根 `KNOWLEDGE.md` 的 `Areas` 常驻，目录级 `KNOWLEDGE.md` 在文件访问后从下一用户轮次开始披露。
+- `session_start` 不递归扫描 cwd；`discoverScopes` 只作为显式 catalog 修复接口，并受目录预算限制。
+
 ## 设计原则
 
 - **Core runtime-agnostic**：`core/` 不 import 任何 pi API，只依赖 Node 标准库；未来可整体迁移到其它 runtime。
@@ -122,6 +128,7 @@ docs/decisions/      ← 架构决策记录（ADR）
 - **0014**: Monorepo knowledge 固定 project/workspace/global 三层作用域
 - **0015**: `/goal` 按 session 隔离并以持久快照绑定完成证据
 - **0016**: Runtime reference 只追加状态变化，保持跨用户轮次 cache prefix
+- **0017**: Knowledge catalog 常驻，目录正文按访问渐进披露，启动阶段零递归扫描
 
 ## 开发
 
