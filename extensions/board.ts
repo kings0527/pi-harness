@@ -42,7 +42,10 @@ export default async function(pi: any) {
             if (!params.topic) throw new Error("topic is required for open");
             if (!params.goal) throw new Error("goal is required for open");
             const topic = openTopic(params.topic, params.goal);
-            return { content: [{ type: "text" as const, text: `Opened topic "${topic.id}" with goal: ${topic.goal}` }] };
+            return {
+              content: [{ type: "text" as const, text: `Opened topic "${topic.id}" with goal: ${topic.goal}` }],
+              details: { action: "open", topic: topic.id },
+            };
           }
           case "post": {
             if (!params.topic) throw new Error("topic is required for post");
@@ -107,7 +110,10 @@ export default async function(pi: any) {
             throw new Error(`Unknown action: ${params.action}`);
         }
       } catch (err: any) {
-        return { content: [{ type: "text" as const, text: `Error: ${err.message}` }] };
+        // Pi marks a tool_result as failed only when execute rejects. Encoding
+        // an error in a resolved result leaves the runtime event isError=false
+        // and can make downstream hooks treat a failed mutation as persisted.
+        throw err instanceof Error ? err : new Error(String(err));
       }
     }
   });

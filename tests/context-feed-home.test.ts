@@ -46,7 +46,7 @@ test("cwd 为 home 的纯聊天首轮保留 global catalog 且不披露子目录
     }
     const reference = results
       .flatMap(result => result?.message ? [result.message] : [])
-      .find(message => message.customType === "pi-harness-reference");
+      .find(message => message.customType === "pi-harness-knowledge-reference");
 
     assert.ok(reference);
     assert.match(reference.content, /knowledge-catalog:/);

@@ -55,13 +55,15 @@ test("action 与 scope schema 包含三层 distill 路由", () => {
 });
 
 test("distill 缺 source 被拒绝，默认写当前子项目根", async () => {
-  const rejected = await run({
-    action: "distill",
-    path: "findings/route-a.md",
-    content: "Conclusion without source.",
-    description: "route test A",
-  });
-  assert.match(rejected, /Source link/);
+  await assert.rejects(
+    run({
+      action: "distill",
+      path: "findings/route-a.md",
+      content: "Conclusion without source.",
+      description: "route test A",
+    }),
+    /Source link/,
+  );
   assert.equal(existsSync(join(projectRoot, "findings", "route-a.md")), false);
 
   const ok = await run({
@@ -142,13 +144,15 @@ test("distill-conflict 正向验证 project/workspace/global scope", async () =>
 });
 
 test("board 路由拒绝越界且不留下部分写入", async () => {
-  const result = await run({
-    action: "distill",
-    path: "../escaped.md",
-    content: "outside",
-    source: "topic-route#seq-9",
-    description: "escape",
-  });
-  assert.match(result, /escapes the project root/);
+  await assert.rejects(
+    run({
+      action: "distill",
+      path: "../escaped.md",
+      content: "outside",
+      source: "topic-route#seq-9",
+      description: "escape",
+    }),
+    /escapes the project root/,
+  );
   assert.equal(existsSync(join(nestedCwd, "escaped.md")), false);
 });

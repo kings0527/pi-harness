@@ -1,43 +1,115 @@
-import { readFileSync, writeFileSync, appendFileSync, existsSync, renameSync, readdirSync, unlinkSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { getStorageRoot, ensureDir } from "../storage/index.ts";
 import { appendEvent } from "../events/index.ts";
 import type { Topic, Note, TopicMeta } from "./types.ts";
 
 function topicsDir(): string { return join(getStorageRoot(), "topics"); }
-function topicJsonlPath(topicId: string): string { return join(topicsDir(), `${topicId}.jsonl`); }
-function topicBoardMdPath(topicId: string): string { return join(topicsDir(), `${topicId}.board.md`); }
+function assertTopicId(topicId: string): void {
+  if (typeof topicId !== "string" || topicId.length === 0 || /[\\/\0]/.test(topicId)) {
+    throw new Error("Topic ID must be one non-empty path segment");
+  }
+}
 
-// Simple file-based lock for single-machine concurrency
+function topicJsonlPath(topicId: string): string {
+  assertTopicId(topicId);
+  return join(topicsDir(), `${topicId}.jsonl`);
+}
+function topicBoardMdPath(topicId: string): string {
+  assertTopicId(topicId);
+  return join(topicsDir(), `${topicId}.board.md`);
+}
+function archivedTopicJsonlPath(topicId: string): string {
+  assertTopicId(topicId);
+  return join(topicsDir(), "archive", `${topicId}.jsonl`);
+}
+
+/** Detect the legacy persisted shape where this ID was closed before reuse. */
+export function hasArchivedTopic(topicId: string): boolean {
+  return existsSync(archivedTopicJsonlPath(topicId));
+}
+
+const lockWait = new Int32Array(new SharedArrayBuffer(4));
+
+// Atomically create the sidecar: existence checks alone race across agents.
 function acquireLock(topicId: string, timeoutMs = 5000): boolean {
   const lockPath = topicJsonlPath(topicId) + ".lock";
   const start = Date.now();
-  while (existsSync(lockPath)) {
-    if (Date.now() - start > timeoutMs) return false;
-    // busy wait (simple approach, sufficient for single machine)
-    const end = Date.now() + 50;
-    while (Date.now() < end) {} // 50ms spin
+  while (true) {
+    let created = false;
+    try {
+      const fd = openSync(lockPath, "wx", 0o600);
+      created = true;
+      try {
+        writeFileSync(fd, String(process.pid), "utf-8");
+      } finally {
+        closeSync(fd);
+      }
+      return true;
+    } catch (error: any) {
+      if (created) {
+        try {
+          unlinkSync(lockPath);
+        } catch (cleanupError: any) {
+          if (cleanupError?.code !== "ENOENT") throw cleanupError;
+        }
+      }
+      if (error?.code !== "EEXIST") throw error;
+      if (Date.now() - start >= timeoutMs) return false;
+      Atomics.wait(lockWait, 0, 0, 10);
+    }
   }
-  writeFileSync(lockPath, String(process.pid), "utf-8");
-  return true;
 }
 
 function releaseLock(topicId: string): void {
   const lockPath = topicJsonlPath(topicId) + ".lock";
-  if (existsSync(lockPath)) unlinkSync(lockPath);
+  try {
+    unlinkSync(lockPath);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+  }
 }
 
 export function openTopic(topicId: string, goal: string): Topic {
   const jsonlPath = topicJsonlPath(topicId);
-  if (existsSync(jsonlPath)) {
-    throw new Error(`Topic "${topicId}" already exists`);
+  if (!acquireLock(topicId)) {
+    throw new Error(`Failed to acquire lock for topic "${topicId}" (timeout)`);
   }
-  const topic: Topic = { id: topicId, goal, status: "open", createdAt: Date.now() };
-  // Write meta as first line (prefixed with #META#)
-  writeFileSync(jsonlPath, `#META#${JSON.stringify(topic)}\n`, "utf-8");
-  renderBoardMd(topicId, topic, []);
-  appendEvent("board_open", { topic: topicId, goal });
-  return topic;
+  try {
+    // A topic id is an append-only Board identity. Reusing it after close would
+    // reset seq to 1 while active checkpoint cursors still refer to the former
+    // incarnation, causing valid new notes to be skipped as already delivered.
+    if (hasArchivedTopic(topicId)) {
+      throw new Error(`Topic "${topicId}" already exists in archive`);
+    }
+    const topic: Topic = { id: topicId, goal, status: "open", createdAt: Date.now() };
+    try {
+      writeFileSync(jsonlPath, `#META#${JSON.stringify(topic)}\n`, {
+        encoding: "utf-8",
+        flag: "wx",
+      });
+    } catch (error: any) {
+      if (error?.code === "EEXIST") throw new Error(`Topic "${topicId}" already exists`);
+      throw error;
+    }
+    renderBoardMd(topicId, topic, []);
+    appendEvent("board_open", { topic: topicId, goal });
+    return topic;
+  } finally {
+    releaseLock(topicId);
+  }
 }
 
 export function postNote(topicId: string, author: string, content: string, opts?: { tags?: string[]; priority?: "critical" }): Note {
@@ -48,9 +120,10 @@ export function postNote(topicId: string, author: string, content: string, opts?
     throw new Error(`Failed to acquire lock for topic "${topicId}" (timeout)`);
   }
   try {
+    if (!existsSync(jsonlPath)) throw new Error(`Topic "${topicId}" not found`);
     // Read existing notes to get next seq
     const notes = readNotes(topicId);
-    const seq = notes.length > 0 ? notes[notes.length - 1].seq + 1 : 1;
+    const seq = notes.length > 0 ? Math.max(...notes.map(note => note.seq)) + 1 : 1;
 
     const note: Note = {
       seq,
@@ -91,6 +164,24 @@ export function readNotes(topicId: string, since?: number): Note[] {
   return notes;
 }
 
+/** Read one closed topic from its immutable archive JSONL. */
+export function readArchivedTopic(topicId: string): { topic: Topic; notes: Note[] } {
+  const jsonlPath = archivedTopicJsonlPath(topicId);
+  const lines = readFileSync(jsonlPath, "utf-8").split("\n").filter(line => line.trim());
+  const metaLine = lines[0];
+  if (!metaLine?.startsWith("#META#")) {
+    throw new Error(`Invalid archived topic file: missing META line for "${topicId}"`);
+  }
+  const topic = JSON.parse(metaLine.slice(6)) as Topic;
+  if (topic.id !== topicId || topic.status !== "closed") {
+    throw new Error(`Invalid archived topic identity or status for "${topicId}"`);
+  }
+  return {
+    topic,
+    notes: lines.slice(1).map(line => JSON.parse(line) as Note),
+  };
+}
+
 export function listTopics(): TopicMeta[] {
   const dir = topicsDir();
   const files = readdirSync(dir).filter(f => f.endsWith(".jsonl"));
@@ -123,48 +214,104 @@ export function listTopics(): TopicMeta[] {
   return topics;
 }
 
+/**
+ * List only currently open topics without reading their note bodies or archive.
+ * A concurrent close may remove a file after readdir; that topic is no longer
+ * open and can be skipped. Other read/parse failures abort the whole listing so
+ * callers never mistake an incomplete directory read for topic closures.
+ */
+export function listOpenTopics(): Topic[] {
+  const files = readdirSync(topicsDir()).filter(file => file.endsWith(".jsonl"));
+  const topics: Topic[] = [];
+  for (const file of files) {
+    const topicId = file.slice(0, -".jsonl".length);
+    try {
+      const topic = getTopicMeta(topicId);
+      if (topic.status === "open") topics.push(topic);
+    } catch (error: any) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+  }
+  return topics;
+}
+
 export function closeTopic(topicId: string): { summary: string; decisions: string } {
   const jsonlPath = topicJsonlPath(topicId);
   if (!existsSync(jsonlPath)) throw new Error(`Topic "${topicId}" not found`);
-
-  const topic = getTopicMeta(topicId);
-  if (topic.status === "closed") throw new Error(`Topic "${topicId}" is already closed`);
-
-  const notes = readNotes(topicId);
-
-  // Generate summary
-  const summary = generateSummary(topic, notes);
-  const decisions = generateDecisions(topic, notes);
-
-  // Update meta to closed
-  const closedTopic: Topic = { ...topic, status: "closed", closedAt: Date.now() };
-  const lines = readFileSync(jsonlPath, "utf-8").split("\n");
-  lines[0] = `#META#${JSON.stringify(closedTopic)}`;
-  writeFileSync(jsonlPath, lines.join("\n"), "utf-8");
-
-  // Move to archive
-  const archiveDir = join(topicsDir(), "archive");
-  ensureDir(archiveDir);
-
-  renameSync(jsonlPath, join(archiveDir, `${topicId}.jsonl`));
-
-  const boardMdPath = topicBoardMdPath(topicId);
-  if (existsSync(boardMdPath)) {
-    renameSync(boardMdPath, join(archiveDir, `${topicId}.board.md`));
+  if (!acquireLock(topicId)) {
+    throw new Error(`Failed to acquire lock for topic "${topicId}" (timeout)`);
   }
+  try {
+    if (!existsSync(jsonlPath)) throw new Error(`Topic "${topicId}" not found`);
+    const topic = getTopicMeta(topicId);
+    if (topic.status === "closed") throw new Error(`Topic "${topicId}" is already closed`);
 
-  // Write summary.md and decisions.md
-  writeFileSync(join(archiveDir, `${topicId}.summary.md`), summary, "utf-8");
-  writeFileSync(join(archiveDir, `${topicId}.decisions.md`), decisions, "utf-8");
+    const notes = readNotes(topicId);
+    const summary = generateSummary(topic, notes);
+    const decisions = generateDecisions(topic, notes);
 
-  appendEvent("board_close", { topic: topicId });
-  return { summary, decisions };
+    const archiveDir = join(topicsDir(), "archive");
+    ensureDir(archiveDir);
+    const archiveTargets = [
+      join(archiveDir, `${topicId}.jsonl`),
+      join(archiveDir, `${topicId}.board.md`),
+      join(archiveDir, `${topicId}.summary.md`),
+      join(archiveDir, `${topicId}.decisions.md`),
+    ];
+    const collisions = archiveTargets.filter(path => existsSync(path));
+    if (collisions.length > 0) {
+      throw new Error(
+        `Archive collision for topic "${topicId}"; active topic was preserved (${collisions.length} existing artifact${collisions.length === 1 ? "" : "s"})`,
+      );
+    }
+
+    const closedTopic: Topic = { ...topic, status: "closed", closedAt: Date.now() };
+    const lines = readFileSync(jsonlPath, "utf-8").split("\n");
+    lines[0] = `#META#${JSON.stringify(closedTopic)}`;
+    writeFileSync(jsonlPath, lines.join("\n"), "utf-8");
+
+    renameSync(jsonlPath, archiveTargets[0]);
+
+    const boardMdPath = topicBoardMdPath(topicId);
+    if (existsSync(boardMdPath)) {
+      renameSync(boardMdPath, archiveTargets[1]);
+    }
+
+    writeFileSync(archiveTargets[2], summary, { encoding: "utf-8", flag: "wx" });
+    writeFileSync(archiveTargets[3], decisions, { encoding: "utf-8", flag: "wx" });
+
+    appendEvent("board_close", { topic: topicId });
+    return { summary, decisions };
+  } finally {
+    releaseLock(topicId);
+  }
 }
 
 // Helper functions
+function readTopicMetaLine(jsonlPath: string): string {
+  const fd = openSync(jsonlPath, "r");
+  const chunks: Buffer[] = [];
+  let position = 0;
+  try {
+    while (true) {
+      const buffer = Buffer.allocUnsafe(1024);
+      const bytesRead = readSync(fd, buffer, 0, buffer.length, position);
+      if (bytesRead === 0) break;
+      const newline = buffer.indexOf(0x0a, 0);
+      chunks.push(buffer.subarray(0, newline >= 0 && newline < bytesRead ? newline : bytesRead));
+      if (newline >= 0 && newline < bytesRead) break;
+      position += bytesRead;
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return Buffer.concat(chunks).toString("utf-8");
+}
+
 function getTopicMeta(topicId: string): Topic {
   const jsonlPath = topicJsonlPath(topicId);
-  const firstLine = readFileSync(jsonlPath, "utf-8").split("\n")[0];
+  const firstLine = readTopicMetaLine(jsonlPath);
   if (!firstLine.startsWith("#META#")) {
     throw new Error(`Invalid topic file: missing META line for "${topicId}"`);
   }
@@ -188,9 +335,17 @@ function renderBoardMd(topicId: string, topic: Topic, notes: Note[]): void {
 
   // Atomic write: tmp + rename
   const boardMdPath = topicBoardMdPath(topicId);
-  const tmpPath = boardMdPath + ".tmp";
-  writeFileSync(tmpPath, md, "utf-8");
-  renameSync(tmpPath, boardMdPath);
+  const tmpPath = `${boardMdPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmpPath, md, { encoding: "utf-8", flag: "wx" });
+    renameSync(tmpPath, boardMdPath);
+  } finally {
+    try {
+      unlinkSync(tmpPath);
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
 }
 
 function generateSummary(topic: Topic, notes: Note[]): string {

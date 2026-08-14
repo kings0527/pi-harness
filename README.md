@@ -32,7 +32,8 @@ pi install github:kings0527/pi-harness         # 从 GitHub
 - **强制溯源**：每条知识条目必须带 `source`（如 `topic-<id>#seq-<N>`），无溯源直接被 runtime 拒绝。
 - **CONFLICT 标记机制**：新知识与旧条目冲突时用 `distill-conflict` 只追加冲突块，永不静默覆盖原内容。
 - **完整上下文**：knowledge index、Board notes 与 subagent 输出保持完整；估算达到当前模型窗口 20% 时仅告警，提示检查过期、错误、重复或过长内容。
-- **稳定且可审计的注入**：reference 每个用户轮次只冻结一次，精确字节写入 `.pi-board/context-snapshots/`；快照或 goal 状态变化时以 append-only 持久消息进入会话，相同内容不重复注入，CRITICAL Board note 保持带来源可见。
+- **稳定且可审计的注入**：knowledge 与 Board 独立持久；Board 对当前 session 参与的 topic 在 active context 先发一次 checkpoint，后续只按 topic `seq` 追加 delta，压缩后 checkpoint 缺失才重发全量。参与关系以 session entry 保存；每份实际注入的精确字节写入 `.pi-board/context-snapshots/`，CRITICAL note 保持带来源可见。
+- **上下文 headroom 护栏**：在 session start、agent settled 和 idle input 边界同时预留 completion + 新输入空间，先于 Pi 默认阈值压缩；session/settled 边界等待压缩结算，越线 input 在自己的原管线内等待（保留 skill/template 展开），non-idle steer/followUp/缺参保持 Pi 原始时机；同 session 额外并发 idle input 不竞争 agent run，而是原样持久化并显式提示重试；最后竞态仅联动收紧 provider 已有 output/thinking budget，无可调字段时显式告警。
 
 ### 哲学层：Discipline + Doctrine
 
@@ -67,13 +68,15 @@ extensions/          ← pi 薄适配层（工具注册 + hooks，唯一接触 p
   board.ts           共享黑板工具
   spawn.ts           多 agent spawn 工具
   storm.ts           /storm 命令注册
-  context-feed.ts    冻结、审计并追加 knowledge + Board reference
+  context-feed.ts    冻结、审计并追加 knowledge + Board checkpoint/delta
+  context-headroom.ts 提前压缩 + provider output 边界护栏
   discipline.ts      纪律 hooks（read-before-write, fail-loud, diff-scope）
   convergence.ts     收敛门禁（close 前置校验 + spawn 轮次护栏）
   doctrine.ts        常驻认知注入（before_agent_start）
 core/                ← 纯 Node.js，runtime 无关（零 pi import）
   board/             黑板逻辑 + digest 生成
   context-reference/ knowledge/Board 分层选择与 reference 格式化
+  context-headroom/  completion/ingress 预留与 output-only clamp 决策
   context-size/      上下文体积估算与告警阈值
   context-snapshot/  注入内容寻址快照
   knowledge/         知识库读写
@@ -129,6 +132,8 @@ docs/decisions/      ← 架构决策记录（ADR）
 - **0015**: `/goal` 按 session 隔离并以持久快照绑定完成证据
 - **0016**: Runtime reference 只追加状态变化，保持跨用户轮次 cache prefix
 - **0017**: Knowledge catalog 常驻，目录正文按访问渐进披露，启动阶段零递归扫描
+- **0018**: Board 每个 active context 一次 checkpoint，后续按 topic seq 追加 delta
+- **0019**: 输出感知的 context headroom，提前压缩并以 output-only clamp 兜底
 
 ## 开发
 

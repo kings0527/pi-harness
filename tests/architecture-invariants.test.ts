@@ -26,7 +26,7 @@ test("完整常驻 prompt + doctrine inline + tool descriptions 保持在保守�
   assert.ok(estimateContextTokens(corpus) <= 900, "keep headroom below the 1000-token invariant");
 });
 
-test("ADR-0011 through ADR-0017 遵守十行格式", () => {
+test("ADR-0011 through ADR-0019 遵守十行格式", () => {
   for (const path of [
     "docs/decisions/0011-fixed-knowledge-handoff-placement.md",
     "docs/decisions/0012-preserve-context-warn-on-size.md",
@@ -35,6 +35,8 @@ test("ADR-0011 through ADR-0017 遵守十行格式", () => {
     "docs/decisions/0015-persistent-goal.md",
     "docs/decisions/0016-append-only-runtime-references.md",
     "docs/decisions/0017-always-on-knowledge-catalog.md",
+    "docs/decisions/0018-board-checkpoint-delta-feed.md",
+    "docs/decisions/0019-context-headroom-guard.md",
   ]) {
     assert.ok(read(path).trimEnd().split("\n").length <= 10, `${path} exceeds 10 lines`);
   }
@@ -61,5 +63,9 @@ test("runtime references are append-only across user turns and goal completion i
 test("context-feed session_start 不递归清点 cwd", () => {
   const contextSource = read("extensions/context-feed.ts");
   assert.doesNotMatch(contextSource, /discoverScopes|scopeCache|readdirSync/);
+  assert.doesNotMatch(contextSource, /refreshOpenTopics/);
+  assert.match(contextSource, /buildBoardDelivery\(participatingTopics, coverage\)/);
+  assert.match(contextSource, /pi-harness-board-participation/);
+  assert.match(contextSource, /pi\.on\("tool_result"/);
   assert.match(contextSource, /findKnowledgeScope/);
 });

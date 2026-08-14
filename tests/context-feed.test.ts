@@ -5,12 +5,18 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  boardCriticalKey,
+  buildBoardDelivery,
+  deriveBoardCoverage,
+} from "../core/context-reference/index.ts";
 
 let originalCwd: string;
 let originalHome: string | undefined;
@@ -151,16 +157,27 @@ async function acknowledgeCritical(results: any[]): Promise<void> {
   }, runtimeContext(1_000_000));
 }
 
+async function joinTopic(topic: string, action: "open" | "post" = "post"): Promise<void> {
+  await fire("tool_result", {
+    tool: "board",
+    input: { action, topic },
+    result: { ok: true },
+  }, runtimeContext(1_000_000));
+}
+
 test("按 project + workspace + global 分层注入，不扫描兄弟项目", async () => {
   const siblingKnowledge = join(workspaceDir, "b", "knowledge");
   mkdirSync(siblingKnowledge, { recursive: true });
   writeFileSync(join(siblingKnowledge, "index.md"), "sibling.md | MUST-NOT-INJECT\n", "utf-8");
 
   const results = await startTurn();
-  const referenceMessage = messageOf(results, "pi-harness-reference");
+  const knowledgeMessage = messageOf(results, "pi-harness-knowledge-reference");
+  const boardCheckpoint = messageOf(results, "pi-harness-board-checkpoint");
   const criticalMessage = messageOf(results, "pi-harness-board-critical");
-  assert.ok(referenceMessage);
-  assert.equal(referenceMessage.display, false);
+  assert.ok(knowledgeMessage);
+  assert.equal(knowledgeMessage.display, false);
+  assert.ok(boardCheckpoint);
+  assert.equal(boardCheckpoint.display, false);
   assert.ok(criticalMessage);
   assert.equal(criticalMessage.display, true);
   assert.match(criticalMessage.content, /Board complete-context#12/);
@@ -168,41 +185,193 @@ test("按 project + workspace + global 分层注入，不扫描兄弟项目", as
   assert.doesNotMatch(criticalMessage.content, /FIRST-NOTE-/);
   assert.equal(handlers.context, undefined, "persistent references must not be moved by a context hook");
 
-  const reference = referenceMessage.content as string;
-  assert.match(reference, /reference_context/);
-  assert.match(reference, /knowledge-catalog:/);
-  assert.match(reference, /a\/src\/feature\/KNOWLEDGE\.md \| feature guidance/);
-  assert.match(reference, /Indexes and Areas are locators/);
-  assert.doesNotMatch(reference, /LAZY-SCOPE-MARKER/);
-  assert.match(reference, /knowledge\(project:/);
-  assert.match(reference, /knowledge\(workspace:/);
-  assert.match(reference, /knowledge\(global:/);
-  assert.match(reference, /BEGIN-LARGE-DESCRIPTION/);
-  assert.match(reference, /END-LARGE-DESCRIPTION/);
-  assert.match(reference, /workspace index row/);
-  assert.match(reference, /global index row/);
-  assert.match(reference, /FIRST-NOTE-/);
-  assert.match(reference, /MIDDLE-NOTE-2-/);
-  assert.match(reference, /MIDDLE-NOTE-11-/);
-  assert.doesNotMatch(reference, /LAST-CRITICAL-/);
-  assert.doesNotMatch(reference, /MUST-NOT-INJECT/);
-  assert.doesNotMatch(reference, /earlier notes omitted/i);
+  const knowledgeReference = knowledgeMessage.content as string;
+  assert.match(knowledgeReference, /knowledge_reference/);
+  assert.match(knowledgeReference, /knowledge-catalog:/);
+  assert.match(knowledgeReference, /a\/src\/feature\/KNOWLEDGE\.md \| feature guidance/);
+  assert.match(knowledgeReference, /Indexes and Areas are locators/);
+  assert.doesNotMatch(knowledgeReference, /LAZY-SCOPE-MARKER/);
+  assert.match(knowledgeReference, /knowledge\(project:/);
+  assert.match(knowledgeReference, /knowledge\(workspace:/);
+  assert.match(knowledgeReference, /knowledge\(global:/);
+  assert.match(knowledgeReference, /BEGIN-LARGE-DESCRIPTION/);
+  assert.match(knowledgeReference, /END-LARGE-DESCRIPTION/);
+  assert.match(knowledgeReference, /workspace index row/);
+  assert.match(knowledgeReference, /global index row/);
+  assert.doesNotMatch(knowledgeReference, /MUST-NOT-INJECT/);
 
-  const snapshotEntry = sessionEntries.at(-1)!;
-  assert.equal(snapshotEntry.type, "pi-harness-context-snapshot");
-  assert.equal(readFileSync(snapshotEntry.data.path, "utf-8"), reference);
-  assert.equal(createHash("sha256").update(reference).digest("hex"), snapshotEntry.data.snapshotId);
+  const boardReference = boardCheckpoint.content as string;
+  assert.match(boardReference, /board_checkpoint/);
+  assert.match(boardReference, /FIRST-NOTE-/);
+  assert.match(boardReference, /MIDDLE-NOTE-2-/);
+  assert.match(boardReference, /MIDDLE-NOTE-11-/);
+  assert.doesNotMatch(boardReference, /LAST-CRITICAL-/);
+  assert.doesNotMatch(boardReference, /earlier notes omitted/i);
+
+  for (const [kind, content] of [
+    ["knowledge", knowledgeReference],
+    ["board-checkpoint", boardReference],
+    ["board-critical", criticalMessage.content as string],
+  ] as const) {
+    const snapshotEntry = sessionEntries.find(entry => entry.data.kind === kind)!;
+    assert.equal(snapshotEntry.type, "pi-harness-context-snapshot");
+    assert.equal(readFileSync(snapshotEntry.data.path, "utf-8"), content);
+    assert.equal(createHash("sha256").update(content).digest("hex"), snapshotEntry.data.snapshotId);
+  }
   await acknowledgeCritical(results);
 });
 
-test("相同 reference 不重复追加；变化时追加新快照且保留旧 request 前缀", async () => {
-  const frozen = contextEntries.find(
-    entry => entry.type === "custom_message" && entry.customType === "pi-harness-reference",
+test("升级时把 active legacy reference 视为 checkpoint，避免重复整块 Board", async () => {
+  const preservedEntries = contextEntries;
+  const topic = "legacy-checkpoint-migration";
+  board.openTopic(topic, "exercise legacy checkpoint migration");
+  board.postNote(topic, "old-agent", "LEGACY-ALREADY-PRESENT");
+  await joinTopic(topic);
+  const topicSeqs = Object.fromEntries(
+    board.listOpenTopics().map(open => {
+      const notes = board.readNotes(open.id);
+      return [open.id, notes.at(-1)?.seq ?? 0];
+    }),
+  );
+  const snapshotId = "legacy-snapshot-fixture";
+  contextEntries = [
+    {
+      type: "custom",
+      customType: "pi-harness-context-snapshot",
+      data: { snapshotId, topicSeqs, boardBytes: 12_345 },
+    },
+    {
+      type: "custom_message",
+      customType: "pi-harness-reference",
+      content: "legacy combined knowledge + complete Board snapshot",
+      details: { snapshotId, state: "active" },
+    },
+  ];
+  try {
+    board.postNote(topic, "new-agent", "LEGACY-MIGRATION-DELTA");
+    const results = await startTurn("first turn after ADR-0018 upgrade");
+    assert.equal(messageOf(results, "pi-harness-board-checkpoint"), undefined);
+    const delta = messageOf(results, "pi-harness-board-delta");
+    assert.ok(delta);
+    assert.match(delta.content, /LEGACY-MIGRATION-DELTA/);
+    assert.doesNotMatch(delta.content, /LEGACY-ALREADY-PRESENT/);
+  } finally {
+    board.closeTopic(topic);
+    contextEntries = preservedEntries;
+  }
+});
+
+test("legacy checkpoint 遇到已归档同 ID 的新 incarnation 时全量重显且修正 cursor", async () => {
+  const preservedEntries = contextEntries;
+  const topic = "legacy-reused-context-topic";
+  board.openTopic(topic, "first incarnation");
+  for (let seq = 1; seq <= 5; seq += 1) {
+    board.postNote(
+      topic,
+      "old-agent",
+      `OLD-INCARNATION-${seq}`,
+      seq === 1 ? { priority: "critical" } : undefined,
+    );
+  }
+  board.closeTopic(topic);
+
+  const topicsPath = join(projectDir, ".pi-board", "topics");
+  const activeCreatedAt = Date.now() + 1;
+  writeFileSync(
+    join(topicsPath, `${topic}.jsonl`),
+    [
+      `#META#${JSON.stringify({
+        id: topic,
+        goal: "second active incarnation",
+        status: "open",
+        createdAt: activeCreatedAt,
+      })}`,
+      JSON.stringify({
+        seq: 1,
+        author: "new-agent",
+        timestamp: Date.now(),
+        content: "NEW-INCARNATION-CRITICAL-MUST-BE-VISIBLE",
+        priority: "critical",
+      }),
+      JSON.stringify({
+        seq: 2,
+        author: "new-agent",
+        timestamp: Date.now(),
+        content: "NEW-INCARNATION-MUST-BE-VISIBLE",
+      }),
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+  writeFileSync(join(topicsPath, `${topic}.board.md`), "legacy reused active fixture\n", "utf-8");
+  await joinTopic(topic);
+
+  const snapshotId = "legacy-reused-snapshot-fixture";
+  contextEntries = [
+    {
+      type: "custom",
+      customType: "pi-harness-context-snapshot",
+      data: { snapshotId, topicSeqs: { [topic]: 5 }, boardBytes: 100 },
+    },
+    {
+      type: "custom_message",
+      customType: "pi-harness-reference",
+      content: "legacy first-incarnation checkpoint",
+      details: { snapshotId, state: "active" },
+    },
+    {
+      type: "custom_message",
+      customType: "pi-harness-board-critical",
+      content: "old incarnation critical already visible",
+      details: { sources: [`Board ${topic}#1`] },
+    },
+  ];
+
+  const errors: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: any[]) => errors.push(args.join(" "));
+  try {
+    const repaired = await startTurn("upgrade reused topic identity");
+    const delta = messageOf(repaired, "pi-harness-board-delta");
+    assert.ok(delta);
+    assert.match(delta.content, /NEW-INCARNATION-MUST-BE-VISIBLE/);
+    assert.doesNotMatch(delta.content, /NEW-INCARNATION-CRITICAL-MUST-BE-VISIBLE/);
+    assert.doesNotMatch(delta.content, /OLD-INCARNATION-/);
+    assert.equal(delta.details.topicSeqs[topic], 2);
+    assert.equal(delta.details.topicIncarnations[topic], activeCreatedAt);
+    assert.ok(errors.some(line => line.includes(`legacy reused topic ${topic} detected`)));
+    const critical = messageOf(repaired, "pi-harness-board-critical");
+    assert.ok(critical);
+    assert.match(critical.content, /NEW-INCARNATION-CRITICAL-MUST-BE-VISIBLE/);
+    assert.doesNotMatch(critical.content, /OLD-INCARNATION-1/);
+    assert.ok(
+      critical.details.criticalKeys.includes(boardCriticalKey(topic, activeCreatedAt, 1)),
+    );
+
+    const stable = await startTurn("incarnation cursor now stable");
+    assert.equal(messageOf(stable, "pi-harness-board-delta"), undefined);
+    assert.equal(messageOf(stable, "pi-harness-board-critical"), undefined);
+  } finally {
+    console.error = originalError;
+    rmSync(join(topicsPath, `${topic}.jsonl`), { force: true });
+    rmSync(join(topicsPath, `${topic}.board.md`), { force: true });
+    for (const suffix of ["jsonl", "board.md", "summary.md", "decisions.md"]) {
+      rmSync(join(topicsPath, "archive", `${topic}.${suffix}`), { force: true });
+    }
+    contextEntries = preservedEntries;
+  }
+});
+
+test("相同来源不重复追加；Board 变化只追加 seq delta", async () => {
+  const frozenKnowledge = contextEntries.find(
+    entry => entry.type === "custom_message" && entry.customType === "pi-harness-knowledge-reference",
   ).content as string;
 
   const beforeUnchanged = structuredClone(contextEntries);
   const unchanged = await startTurn("same sources");
-  assert.equal(messageOf(unchanged, "pi-harness-reference"), undefined);
+  assert.equal(messageOf(unchanged, "pi-harness-knowledge-reference"), undefined);
+  assert.equal(messageOf(unchanged, "pi-harness-board-checkpoint"), undefined);
+  assert.equal(messageOf(unchanged, "pi-harness-board-delta"), undefined);
   assert.deepEqual(contextEntries.slice(0, beforeUnchanged.length), beforeUnchanged);
 
   board.postNote("complete-context", "worker", "NEW-MID-LOOP-NOTE");
@@ -211,20 +380,130 @@ test("相同 reference 不重复追加；变化时追加新快照且保留旧 re
   const cachedPrefix = structuredClone(contextEntries);
   const changed = await startTurn("next question");
   assert.deepEqual(contextEntries.slice(0, cachedPrefix.length), cachedPrefix);
-  const refreshed = messageOf(changed, "pi-harness-reference").content as string;
-  assert.notEqual(refreshed, frozen);
-  assert.match(refreshed, /NEW-MID-LOOP-NOTE/);
-  assert.doesNotMatch(refreshed, /NEW-MID-LOOP-CRITICAL/);
+  assert.equal(messageOf(changed, "pi-harness-knowledge-reference"), undefined);
+  assert.equal(messageOf(changed, "pi-harness-board-checkpoint"), undefined);
+  const delta = messageOf(changed, "pi-harness-board-delta").content as string;
+  assert.match(delta, /board_delta/);
+  assert.match(delta, /NEW-MID-LOOP-NOTE/);
+  assert.doesNotMatch(delta, /FIRST-NOTE-/);
+  assert.doesNotMatch(delta, /MIDDLE-NOTE-11-/);
+  assert.doesNotMatch(delta, /NEW-MID-LOOP-CRITICAL/);
   const critical = messageOf(changed, "pi-harness-board-critical");
   assert.match(critical.content, /Board complete-context#14/);
   assert.match(critical.content, /NEW-MID-LOOP-CRITICAL/);
   assert.doesNotMatch(critical.content, /LAST-CRITICAL-/);
   await acknowledgeCritical(changed);
 
-  const referenceCount = contextEntries.filter(
-    entry => entry.type === "custom_message" && entry.customType === "pi-harness-reference",
-  ).length;
-  assert.equal(referenceCount, 2);
+  assert.equal(contextEntries.filter(
+    entry => entry.type === "custom_message" && entry.customType === "pi-harness-knowledge-reference",
+  ).length, 1);
+  assert.equal(contextEntries.filter(
+    entry => entry.type === "custom_message" && entry.customType === "pi-harness-board-checkpoint",
+  ).length, 1);
+  assert.equal(contextEntries.filter(
+    entry => entry.type === "custom_message" && entry.customType === "pi-harness-board-delta",
+  ).length, 1);
+  assert.equal(contextEntries.find(
+    entry => entry.type === "custom_message" && entry.customType === "pi-harness-knowledge-reference",
+  ).content, frozenKnowledge);
+});
+
+test("并发 before_agent_start 以本次 ctx 关联 Board/CRITICAL，不串用 session 单槽", async () => {
+  assert.equal(handlers.before_agent_start.length, 3);
+  const [plan, deliverBoard, deliverCritical] = handlers.before_agent_start;
+  const ctxA = runtimeContext(1_000_000);
+  const ctxB = runtimeContext(1_000_000);
+
+  board.postNote("complete-context", "agent-a", "INTERLEAVE-A-NOTE");
+  board.postNote("complete-context", "agent-a", "INTERLEAVE-A-CRITICAL", { priority: "critical" });
+  await plan({ prompt: "A", systemPrompt: "system" }, ctxA);
+
+  board.postNote("complete-context", "agent-b", "INTERLEAVE-B-NOTE");
+  board.postNote("complete-context", "agent-b", "INTERLEAVE-B-CRITICAL", { priority: "critical" });
+  await plan({ prompt: "B", systemPrompt: "system" }, ctxB);
+
+  const boardA = (await deliverBoard({}, ctxA))?.message;
+  const boardB = (await deliverBoard({}, ctxB))?.message;
+  const criticalA = (await deliverCritical({}, ctxA))?.message;
+  const criticalB = (await deliverCritical({}, ctxB))?.message;
+  assert.match(boardA.content, /INTERLEAVE-A-NOTE/);
+  assert.doesNotMatch(boardA.content, /INTERLEAVE-B-NOTE/);
+  assert.match(boardB.content, /INTERLEAVE-A-NOTE/);
+  assert.match(boardB.content, /INTERLEAVE-B-NOTE/);
+  assert.match(criticalA.content, /INTERLEAVE-A-CRITICAL/);
+  assert.doesNotMatch(criticalA.content, /INTERLEAVE-B-CRITICAL/);
+  assert.match(criticalB.content, /INTERLEAVE-A-CRITICAL/);
+  assert.match(criticalB.content, /INTERLEAVE-B-CRITICAL/);
+
+  // Persist the later invocation as Pi would, so following stateful fixtures
+  // start from the newest cursor and announced CRITICAL set.
+  for (const message of [boardB, criticalB]) {
+    contextEntries.push({
+      type: "custom_message",
+      ...message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+test("仅新增 CRITICAL 时不生成空 delta，可见消息携带 cursor", async () => {
+  board.postNote("complete-context", "reviewer", "CRITICAL-ONLY-UPDATE", { priority: "critical" });
+  const results = await startTurn("critical only");
+  assert.equal(messageOf(results, "pi-harness-board-delta"), undefined);
+  const critical = messageOf(results, "pi-harness-board-critical");
+  assert.ok(critical);
+  assert.match(critical.content, /CRITICAL-ONLY-UPDATE/);
+  assert.equal(critical.details.topicSeqs["complete-context"], 19);
+  await acknowledgeCritical(results);
+
+  const next = await startTurn("critical already covered");
+  assert.equal(messageOf(next, "pi-harness-board-delta"), undefined);
+  assert.equal(messageOf(next, "pi-harness-board-critical"), undefined);
+});
+
+test("CRITICAL 可见消息不推进被动 Board cursor", () => {
+  const coverage = deriveBoardCoverage([
+    {
+      mode: "checkpoint",
+      topicSeqs: { "complete-context": 14 },
+      topicStates: { "complete-context": "open" },
+    },
+    {
+      mode: "critical",
+      topicSeqs: { "complete-context": 15 },
+      topicStates: { "complete-context": "open" },
+    },
+  ]);
+  assert.equal(coverage.topicSeqs["complete-context"], 14);
+});
+
+test("open topic 正文损坏时延后首次 checkpoint，不声明空 Board", () => {
+  const path = join(projectDir, ".pi-board", "topics", "corrupt-topic.jsonl");
+  writeFileSync(
+    path,
+    `#META#${JSON.stringify({
+      id: "corrupt-topic",
+      goal: "exercise incomplete topic read",
+      status: "open",
+      createdAt: Date.now(),
+    })}\n{not-json}\n`,
+    "utf-8",
+  );
+  try {
+    const delivery = buildBoardDelivery(new Set(["corrupt-topic"]), {
+      hasCheckpoint: false,
+      topicSeqs: {},
+      topicStates: {},
+      topicIncarnations: {},
+    });
+    assert.equal(delivery.mode, "none");
+    assert.equal(delivery.content, "");
+    assert.deepEqual(delivery.warnings, [
+      "open topic corrupt-topic body read failed; checkpoint deferred",
+    ]);
+  } finally {
+    rmSync(path, { force: true });
+  }
 });
 
 test("达到模型窗口 20% 时只告警一次且保留全文", async () => {
@@ -233,11 +512,14 @@ test("达到模型窗口 20% 时只告警一次且保留全文", async () => {
   console.error = (...args: any[]) => errors.push(args.join(" "));
   try {
     await startTurn("small-window", 1_000);
-    const latestReference = [...contextEntries].reverse().find(
-      (entry: any) => entry.type === "custom_message" && entry.customType === "pi-harness-reference",
+    const latestKnowledge = [...contextEntries].reverse().find(
+      (entry: any) => entry.type === "custom_message" && entry.customType === "pi-harness-knowledge-reference",
     );
-    assert.match(latestReference.content, /END-LARGE-DESCRIPTION/);
-    assert.match(latestReference.content, /NEW-MID-LOOP-NOTE/);
+    const latestBoardDelta = [...contextEntries].reverse().find(
+      (entry: any) => entry.type === "custom_message" && entry.customType === "pi-harness-board-delta",
+    );
+    assert.match(latestKnowledge.content, /END-LARGE-DESCRIPTION/);
+    assert.match(latestBoardDelta.content, /INTERLEAVE-B-NOTE/);
 
     await startTurn("small-window-again", 1_000);
   } finally {
@@ -246,6 +528,15 @@ test("达到模型窗口 20% 时只告警一次且保留全文", async () => {
 
   const sizeWarnings = errors.filter(line => line.includes("Full context preserved"));
   assert.equal(sizeWarnings.length, 1);
+  const breakdown = sizeWarnings[0].match(
+    /~(\d+) tokens .* current knowledge ~(\d+), active Board references ~(\d+), retained runtime references ~(\d+)/,
+  );
+  assert.ok(breakdown);
+  const [total, knowledgeTokens, boardTokens, retainedTokens] = breakdown.slice(1).map(Number);
+  assert.ok(
+    Math.abs(total - knowledgeTokens - boardTokens - retainedTokens) <= 3,
+    `warning breakdown must be disjoint: ${sizeWarnings[0]}`,
+  );
   assert.match(sizeWarnings[0], /stale, incorrect, duplicate, or overly verbose/);
 });
 
@@ -276,7 +567,7 @@ test("文件访问后在下一轮披露最近的目录级 knowledge 正文", asy
   );
 
   const results = await startTurn("scope activated");
-  const reference = messageOf(results, "pi-harness-reference");
+  const reference = messageOf(results, "pi-harness-knowledge-reference");
   assert.ok(reference);
   assert.match(reference.content, /scope\(a\/src\/feature\):/);
   assert.match(reference.content, /LAZY-SCOPE-MARKER/);
@@ -291,9 +582,263 @@ test("session resume 从持久消息恢复 CRITICAL 已读集合", async () => {
 
   const results = await startTurn("resumed");
   assert.equal(messageOf(results, "pi-harness-board-critical"), undefined);
-  const reference = messageOf(results, "pi-harness-reference");
+  assert.equal(messageOf(results, "pi-harness-board-checkpoint"), undefined);
+  assert.equal(messageOf(results, "pi-harness-board-delta"), undefined);
+  const reference = messageOf(results, "pi-harness-knowledge-reference");
   assert.ok(reference);
   assert.match(reference.content, /knowledge-catalog:/);
   assert.match(reference.content, /a\/src\/feature\/KNOWLEDGE\.md \| feature guidance/);
   assert.doesNotMatch(reference.content, /LAZY-SCOPE-MARKER/);
+});
+
+test("压缩使 active checkpoint 缺失时重发完整 Board，不依赖历史 branch", async () => {
+  const historical = contextEntries;
+  contextEntries = historical.filter(entry => entry.type === "message").slice(-2);
+
+  const results = await startTurn("after compaction");
+  const checkpoint = messageOf(results, "pi-harness-board-checkpoint");
+  assert.ok(checkpoint);
+  assert.match(checkpoint.content, /FIRST-NOTE-/);
+  assert.match(checkpoint.content, /NEW-MID-LOOP-NOTE/);
+  assert.doesNotMatch(checkpoint.content, /LAST-CRITICAL-/);
+  const critical = messageOf(results, "pi-harness-board-critical");
+  assert.ok(critical);
+  assert.match(critical.content, /LAST-CRITICAL-/);
+  assert.match(critical.content, /NEW-MID-LOOP-CRITICAL/);
+  assert.match(critical.content, /CRITICAL-ONLY-UPDATE/);
+
+  const frozen = sessionEntries.find(
+    entry => entry.data.kind === "board-critical" && entry.data.snapshotId === critical.details.snapshotId,
+  )!;
+  assert.equal(readFileSync(frozen.data.path, "utf-8"), critical.content);
+  assert.equal(createHash("sha256").update(critical.content).digest("hex"), frozen.data.snapshotId);
+});
+
+test("branch 只保留 checkpoint 时，缺失的 CRITICAL 正文会重显", async () => {
+  contextEntries = contextEntries.filter(
+    entry => entry.customType !== "pi-harness-board-critical",
+  );
+
+  const results = await startTurn("critical branch recovery");
+  assert.equal(messageOf(results, "pi-harness-board-checkpoint"), undefined);
+  assert.equal(messageOf(results, "pi-harness-board-delta"), undefined);
+  const critical = messageOf(results, "pi-harness-board-critical");
+  assert.ok(critical);
+  assert.match(critical.content, /LAST-CRITICAL-/);
+  assert.match(critical.content, /NEW-MID-LOOP-CRITICAL/);
+  assert.match(critical.content, /CRITICAL-ONLY-UPDATE/);
+});
+
+test("失败的 Board open/post result 不会让 session 加入 topic", async () => {
+  const topic = "failed-board-join";
+  board.openTopic(topic, "failed mutations are not participation evidence");
+  board.postNote(topic, "peer", "FAILED-JOIN-MUST-STAY-HIDDEN");
+  await fire("tool_result", {
+    tool: "board",
+    input: { action: "post", topic },
+    isError: true,
+  }, runtimeContext(1_000_000));
+
+  const results = await startTurn("failed Board mutation");
+  assert.equal(messageOf(results, "pi-harness-board-delta"), undefined);
+  board.closeTopic(topic);
+});
+
+test("未参与的 peer topic 不泄露，当前 agent 首次 post 后以完整 open delta 加入", async () => {
+  board.openTopic("cross-agent-topic", "Cross-agent synchronization");
+  board.postNote("cross-agent-topic", "other-agent", "CROSS-AGENT-FIRST-NOTE");
+
+  const unseen = await startTurn("unjoined peer topic remains isolated");
+  assert.equal(messageOf(unseen, "pi-harness-board-delta"), undefined);
+
+  board.postNote("cross-agent-topic", "current-agent", "CURRENT-AGENT-JOIN-NOTE");
+  await joinTopic("cross-agent-topic");
+  const joined = await startTurn("observe joined peer topic");
+  const delta = messageOf(joined, "pi-harness-board-delta");
+  assert.ok(delta);
+  assert.match(delta.content, /cross-agent-topic/);
+  assert.match(delta.content, /CROSS-AGENT-FIRST-NOTE/);
+  assert.match(delta.content, /CURRENT-AGENT-JOIN-NOTE/);
+  assert.ok(sessionEntries.some(entry => (
+    entry.type === "pi-harness-board-participation"
+      && entry.data.action === "join"
+      && entry.data.topic === "cross-agent-topic"
+  )));
+});
+
+test("已覆盖 topic 关闭后只追加 tombstone", async () => {
+  board.closeTopic("cross-agent-topic");
+  const results = await startTurn("observe close");
+  const delta = messageOf(results, "pi-harness-board-delta");
+  assert.ok(delta);
+  assert.match(delta.content, /topic_closed/);
+  assert.match(delta.content, /cross-agent-topic/);
+  assert.doesNotMatch(delta.content, /CROSS-AGENT-FIRST-NOTE/);
+});
+
+test("peer 在两轮间 post 后 close 时先补齐 archive final delta/CRITICAL 再 tombstone", async () => {
+  const topic = "close-with-unseen-final-notes";
+  board.openTopic(topic, "deliver final notes before closure");
+  board.postNote(topic, "peer", "CLOSE-BASELINE-NOTE");
+  await joinTopic(topic);
+  const opened = await startTurn("observe topic before peer close");
+  assert.match(messageOf(opened, "pi-harness-board-delta").content, /CLOSE-BASELINE-NOTE/);
+
+  board.postNote(topic, "peer", "CLOSE-FINAL-NONCRITICAL");
+  board.postNote(topic, "peer", "CLOSE-FINAL-CRITICAL", { priority: "critical" });
+  board.closeTopic(topic);
+
+  const closed = await startTurn("observe peer final post and close");
+  const delta = messageOf(closed, "pi-harness-board-delta");
+  assert.ok(delta);
+  assert.match(delta.content, /CLOSE-FINAL-NONCRITICAL/);
+  assert.match(delta.content, /topic_closed/);
+  assert.match(delta.content, new RegExp(topic));
+  assert.doesNotMatch(delta.content, /CLOSE-BASELINE-NOTE/);
+  assert.doesNotMatch(delta.content, /CLOSE-FINAL-CRITICAL/);
+  const critical = messageOf(closed, "pi-harness-board-critical");
+  assert.ok(critical);
+  assert.match(critical.content, /CLOSE-FINAL-CRITICAL/);
+
+  const stable = await startTurn("closed final delta already covered");
+  assert.equal(messageOf(stable, "pi-harness-board-delta"), undefined);
+  assert.equal(messageOf(stable, "pi-harness-board-critical"), undefined);
+
+  contextEntries = contextEntries.filter(entry => !(
+    entry.type === "custom_message"
+      && entry.customType === "pi-harness-board-critical"
+      && entry.details?.sources?.includes(`Board ${topic}#3`)
+  ));
+  const recovered = await startTurn("closing CRITICAL was compacted away");
+  assert.equal(messageOf(recovered, "pi-harness-board-delta"), undefined);
+  assert.match(
+    messageOf(recovered, "pi-harness-board-critical").content,
+    /CLOSE-FINAL-CRITICAL/,
+  );
+  const recoveredStable = await startTurn("closing CRITICAL recovery persisted");
+  assert.equal(messageOf(recoveredStable, "pi-harness-board-critical"), undefined);
+
+  const afterFullBoardCompaction = buildBoardDelivery(new Set([topic]), {
+    hasCheckpoint: false,
+    topicSeqs: {},
+    topicStates: {},
+    topicIncarnations: {},
+  });
+  assert.equal(afterFullBoardCompaction.mode, "checkpoint");
+  assert.equal(afterFullBoardCompaction.topicStates[topic], "closed");
+  assert.equal(afterFullBoardCompaction.topicSeqs[topic], 3);
+  assert.ok(afterFullBoardCompaction.criticalUpdates.some(
+    update => update.topic === topic && update.note.content === "CLOSE-FINAL-CRITICAL",
+  ));
+});
+
+test("closed candidate 的 archive 缺失或 incarnation 不匹配时保留 open cursor 并等待重试", () => {
+  const missing = buildBoardDelivery(new Set(["missing-close-archive"]), {
+    hasCheckpoint: true,
+    topicSeqs: { "missing-close-archive": 3 },
+    topicStates: { "missing-close-archive": "open" },
+    topicIncarnations: { "missing-close-archive": 123 },
+  });
+  assert.equal(missing.mode, "none");
+  assert.deepEqual(missing.topicStates, {});
+  assert.ok(missing.warnings?.[0].includes("archive unavailable or invalid"));
+
+  const archived = board.listTopics().find(item => item.id === "cross-agent-topic" && item.status === "closed");
+  assert.ok(archived);
+  const mismatched = buildBoardDelivery(new Set(["cross-agent-topic"]), {
+    hasCheckpoint: true,
+    topicSeqs: { "cross-agent-topic": 1 },
+    topicStates: { "cross-agent-topic": "open" },
+    topicIncarnations: { "cross-agent-topic": archived.createdAt + 1 },
+  });
+  assert.equal(mismatched.mode, "none");
+  assert.deepEqual(mismatched.topicStates, {});
+  assert.deepEqual(mismatched.warnings, [
+    "closed topic cross-agent-topic archive incarnation mismatch; prior open cursor retained",
+  ]);
+});
+
+test("__proto__ topic ID 在 checkpoint/coverage/delta 中作为 own cursor key 稳定往返", () => {
+  const topic = "__proto__";
+  board.openTopic(topic, "reserved object key must remain a Board identity");
+  board.postNote(topic, "agent", "PROTO-FIRST-NOTE");
+  const checkpoint = buildBoardDelivery(new Set([topic]), {
+    hasCheckpoint: false,
+    topicSeqs: {},
+    topicStates: {},
+    topicIncarnations: {},
+  });
+  assert.equal(checkpoint.mode, "checkpoint");
+  assert.equal(Object.hasOwn(checkpoint.topicSeqs, topic), true);
+  assert.equal(checkpoint.topicSeqs[topic], 1);
+
+  const coverage = deriveBoardCoverage([JSON.parse(JSON.stringify(checkpoint))]);
+  assert.equal(Object.hasOwn(coverage.topicStates, topic), true);
+  assert.equal(coverage.topicStates[topic], "open");
+  board.postNote(topic, "agent", "PROTO-SECOND-NOTE");
+  const delta = buildBoardDelivery(new Set([topic]), coverage);
+  assert.equal(delta.mode, "delta");
+  assert.match(delta.content, /PROTO-SECOND-NOTE/);
+  assert.doesNotMatch(delta.content, /PROTO-FIRST-NOTE/);
+  assert.equal(Object.hasOwn(delta.topicIncarnations, topic), true);
+  assert.equal(delta.topicSeqs[topic], 2);
+  const stableCoverage = deriveBoardCoverage([
+    JSON.parse(JSON.stringify(checkpoint)),
+    JSON.parse(JSON.stringify(delta)),
+  ]);
+  assert.equal(buildBoardDelivery(new Set([topic]), stableCoverage).mode, "none");
+  board.closeTopic(topic);
+});
+
+test("Board listing 失败时延后同步，不把仍开放 topic 误判为关闭", async () => {
+  const topics = join(projectDir, ".pi-board", "topics");
+  const unavailable = join(projectDir, ".pi-board", "topics-unavailable");
+  const errors: string[] = [];
+  const originalError = console.error;
+  renameSync(topics, unavailable);
+  console.error = (...args: any[]) => errors.push(args.join(" "));
+  try {
+    const results = await startTurn("listing unavailable");
+    assert.equal(messageOf(results, "pi-harness-board-checkpoint"), undefined);
+    assert.equal(messageOf(results, "pi-harness-board-delta"), undefined);
+    assert.ok(errors.some(line => line.includes("Board delivery notice")));
+  } finally {
+    console.error = originalError;
+    renameSync(unavailable, topics);
+  }
+});
+
+test("startup participation 初始化失败后，单个 join 不会阻止全量基线重试", async () => {
+  const preservedEntries = contextEntries;
+  const healthy = "init-retry-healthy";
+  const joined = "init-retry-joined";
+  const broken = "init-retry-broken";
+  board.openTopic(healthy, "must join after initialization retry");
+  board.postNote(healthy, "peer", "HEALTHY-BASELINE-MUST-APPEAR");
+  board.openTopic(joined, "explicit join while initialization is incomplete");
+  board.openTopic(broken, "temporarily malformed startup fixture");
+  const brokenPath = join(projectDir, ".pi-board", "topics", `${broken}.jsonl`);
+  const originalBroken = readFileSync(brokenPath, "utf-8");
+  contextEntries = [];
+
+  try {
+    writeFileSync(brokenPath, "invalid-meta\n", "utf-8");
+    await fire("session_start", { reason: "resume" }, runtimeContext(1_000_000));
+    writeFileSync(brokenPath, originalBroken, "utf-8");
+
+    board.postNote(joined, "current-agent", "EXPLICIT-JOIN-MUST-APPEAR");
+    await joinTopic(joined);
+    const results = await startTurn("retry incomplete participation initialization");
+    const checkpoint = messageOf(results, "pi-harness-board-checkpoint");
+    assert.ok(checkpoint);
+    assert.match(checkpoint.content, /HEALTHY-BASELINE-MUST-APPEAR/);
+    assert.match(checkpoint.content, /EXPLICIT-JOIN-MUST-APPEAR/);
+  } finally {
+    writeFileSync(brokenPath, originalBroken, "utf-8");
+    for (const topic of [healthy, joined, broken]) {
+      if (board.listOpenTopics().some(open => open.id === topic)) board.closeTopic(topic);
+    }
+    contextEntries = preservedEntries;
+    await fire("session_start", { reason: "resume" }, runtimeContext(1_000_000));
+  }
 });

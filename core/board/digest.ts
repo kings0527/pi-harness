@@ -14,6 +14,11 @@ export interface DigestOptions {
   lastSeq?: number;
 }
 
+export interface ReferenceDigestOptions extends DigestOptions {
+  /** Return every CRITICAL note so a missing visible message can be rebuilt. */
+  includeAllCritical?: boolean;
+}
+
 export interface DigestResult {
   text: string;
   lastSeq: number;
@@ -22,6 +27,7 @@ export interface DigestResult {
 
 export interface ReferenceDigestResult extends DigestResult {
   criticalNotes: Note[];
+  cursorReset: boolean;
 }
 
 function formatNote(note: Note): string {
@@ -84,13 +90,39 @@ export function generateDigest(topicId: string, opts: DigestOptions = {}): Diges
  * note remains in the reference digest exactly once; critical notes are returned
  * verbatim for a persistent, operator-visible message (ADR-0013).
  */
-export function generateReferenceDigest(topicId: string): ReferenceDigestResult {
-  const notes = readNotes(topicId);
+export function generateReferenceDigest(
+  topicId: string,
+  opts: ReferenceDigestOptions = {},
+): ReferenceDigestResult {
+  // readNotes already parses the complete append-only JSONL before applying
+  // `since`; retain that complete set for CRITICAL recovery at no extra I/O.
+  return generateReferenceDigestFromNotes(readNotes(topicId), opts);
+}
+
+/** Build the same reference digest from an already captured active/archive note set. */
+export function generateReferenceDigestFromNotes(
+  allNotes: Note[],
+  opts: ReferenceDigestOptions = {},
+): ReferenceDigestResult {
+  const currentLastSeq = allNotes.at(-1)?.seq ?? 0;
+  const cursorReset = opts.lastSeq !== undefined && opts.lastSeq > currentLastSeq;
+  const notes = opts.lastSeq === undefined || cursorReset
+    ? allNotes
+    : allNotes.filter(note => note.seq > opts.lastSeq!);
   if (notes.length === 0) {
-    return { text: "", lastSeq: 0, byteLength: 0, criticalNotes: [] };
+    return {
+      text: "",
+      lastSeq: currentLastSeq,
+      byteLength: 0,
+      cursorReset,
+      criticalNotes: opts.includeAllCritical
+        ? allNotes.filter(note => note.priority === "critical")
+        : [],
+    };
   }
 
-  const criticalNotes = notes.filter(note => note.priority === "critical");
+  const criticalNotes = (opts.includeAllCritical ? allNotes : notes)
+    .filter(note => note.priority === "critical");
   const referenceNotes = notes.filter(note => note.priority !== "critical");
   const text = formatCompleteDigest(referenceNotes);
   return {
@@ -98,6 +130,7 @@ export function generateReferenceDigest(topicId: string): ReferenceDigestResult 
     lastSeq: notes.at(-1)!.seq,
     byteLength: Buffer.byteLength(text, "utf-8"),
     criticalNotes,
+    cursorReset,
   };
 }
 

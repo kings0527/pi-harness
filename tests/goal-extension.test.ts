@@ -217,15 +217,18 @@ test("failed Board execution never completes a goal", async () => {
   };
 
   assert.equal(handlers.tool_call?.length ?? 0, 0, "goal completion must not run in preflight");
-  const result = await boardTool.execute("failed", input, undefined, undefined, ctx);
-  assert.match(result.content[0].text, /topic is required/);
+  await assert.rejects(
+    boardTool.execute("failed", input, undefined, undefined, ctx),
+    /topic is required/,
+  );
+  // AgentSession converts a rejected execute() into the standard failed
+  // tool_result event consumed by extensions.
   await fire("tool_result", {
     toolName: "board",
     toolCallId: "failed",
     input,
-    content: result.content,
-    details: result.details,
-    isError: false,
+    content: [{ type: "text", text: "topic is required for post" }],
+    isError: true,
   }, ctx);
   assert.equal(goal.getGoal(sessionId)?.status, "active");
 });
@@ -250,7 +253,7 @@ test("only a persisted Board note bound to the current goal completes it", async
     input: wrongInput,
     content: wrongResult.content,
     details: wrongResult.details,
-    isError: false,
+    isError: wrongResult.isError ?? false,
   }, ctx);
   assert.equal(goal.getGoal(sessionId)?.status, "active");
 
@@ -267,7 +270,7 @@ test("only a persisted Board note bound to the current goal completes it", async
     input,
     content: result.content,
     details: result.details,
-    isError: false,
+    isError: result.isError ?? false,
   }, ctx);
 
   const completed = goal.getGoal(sessionId)!;
