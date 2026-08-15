@@ -37,6 +37,7 @@ test("ADR-0011 through ADR-0019 遵守十行格式", () => {
     "docs/decisions/0017-always-on-knowledge-catalog.md",
     "docs/decisions/0018-board-checkpoint-delta-feed.md",
     "docs/decisions/0019-context-headroom-guard.md",
+    "docs/decisions/0020-board-integrity-guard.md",
   ]) {
     assert.ok(read(path).trimEnd().split("\n").length <= 10, `${path} exceeds 10 lines`);
   }

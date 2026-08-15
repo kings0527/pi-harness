@@ -4,7 +4,6 @@ import {
   existsSync,
   openSync,
   readFileSync,
-  readSync,
   readdirSync,
   renameSync,
   unlinkSync,
@@ -14,7 +13,8 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { getStorageRoot, ensureDir } from "../storage/index.ts";
 import { appendEvent } from "../events/index.ts";
-import type { Topic, Note, TopicMeta } from "./types.ts";
+import { assertArchivedTopicIntact, validateNoteSeq, validateNoteShape, validateTopicShape } from "./integrity.ts";
+import type { Topic, Note, TopicMeta, WitnessKind } from "./types.ts";
 
 function topicsDir(): string { return join(getStorageRoot(), "topics"); }
 function assertTopicId(topicId: string): void {
@@ -82,6 +82,67 @@ function releaseLock(topicId: string): void {
   }
 }
 
+/**
+ * ADR-0020: the single validated entry for every live-topic read. A live
+ * JSONL is only trustworthy when: META is the first line (and only there),
+ * id matches, status is open, every other line is a Note, and seq runs
+ * 1,2,3,…,N. Anything else means an external rewrite (Git conflict) and
+ * throws — callers never mistake a corrupted file for real history, and
+ * writes to a corrupted topic are refused before any append.
+ */
+function readActiveTopic(topicId: string): { topic: Topic; notes: Note[] } {
+  const jsonlPath = topicJsonlPath(topicId);
+  if (!existsSync(jsonlPath)) throw new Error(`Topic "${topicId}" not found`);
+
+  const lines = readFileSync(jsonlPath, "utf-8").split("\n").filter(l => l.trim());
+  if (!lines[0]?.startsWith("#META#")) {
+    throw new Error(`Topic "${topicId}" JSONL is corrupted: missing META line`);
+  }
+  let topic: Topic;
+  try {
+    topic = JSON.parse(lines[0].slice(6)) as Topic;
+  } catch {
+    throw new Error(`Topic "${topicId}" JSONL is corrupted: META line is not valid JSON`);
+  }
+  const topicShapeIssue = validateTopicShape(topic);
+  if (topicShapeIssue) {
+    throw new Error(`Topic "${topicId}" JSONL is corrupted: META shape invalid: ${topicShapeIssue}`);
+  }
+  if (topic.id !== topicId || topic.status !== "open") {
+    throw new Error(
+      `Topic "${topicId}" JSONL is corrupted: META identity/status mismatch (${topic.id}/${topic.status})`,
+    );
+  }
+  const notes: Note[] = [];
+  for (let i = 1; i < lines.length; i += 1) {
+    let note: Note;
+    try {
+      note = JSON.parse(lines[i]) as Note;
+    } catch {
+      throw new Error(`Topic "${topicId}" JSONL is corrupted: line ${i + 1} is not valid JSON`);
+    }
+    const noteShapeIssue = validateNoteShape(note);
+    if (noteShapeIssue) {
+      throw new Error(
+        `Topic "${topicId}" JSONL is corrupted: line ${i + 1} shape invalid: ${noteShapeIssue}`,
+      );
+    }
+    notes.push(note);
+  }
+  const seqIssues = validateNoteSeq(notes);
+  if (seqIssues.length > 0) {
+    throw new Error(
+      `Topic "${topicId}" JSONL is corrupted (seq gap/rollback — external rewrite or Git conflict?): ${seqIssues.join("; ")}`,
+    );
+  }
+  return { topic, notes };
+}
+
+/**
+ * A topic id is an append-only Board identity. Reusing it after close would
+ * reset seq to 1 while active checkpoint cursors still refer to the former
+ * incarnation, causing valid new notes to be skipped as already delivered.
+ */
 export function openTopic(topicId: string, goal: string): Topic {
   const jsonlPath = topicJsonlPath(topicId);
   if (!acquireLock(topicId)) {
@@ -95,6 +156,12 @@ export function openTopic(topicId: string, goal: string): Topic {
       throw new Error(`Topic "${topicId}" already exists in archive`);
     }
     const topic: Topic = { id: topicId, goal, status: "open", createdAt: Date.now() };
+    // ADR-0020: guard BEFORE the first byte is written — a shape-invalid
+    // Topic must never be persisted and discovered later via re-read.
+    const shapeIssue = validateTopicShape(topic);
+    if (shapeIssue) {
+      throw new Error(`Topic "${topicId}" rejected before write: ${shapeIssue}`);
+    }
     try {
       writeFileSync(jsonlPath, `#META#${JSON.stringify(topic)}\n`, {
         encoding: "utf-8",
@@ -120,10 +187,11 @@ export function postNote(topicId: string, author: string, content: string, opts?
     throw new Error(`Failed to acquire lock for topic "${topicId}" (timeout)`);
   }
   try {
-    if (!existsSync(jsonlPath)) throw new Error(`Topic "${topicId}" not found`);
-    // Read existing notes to get next seq
-    const notes = readNotes(topicId);
-    const seq = notes.length > 0 ? Math.max(...notes.map(note => note.seq)) + 1 : 1;
+    // ADR-0020: validate the whole file inside the lock, BEFORE appending —
+    // a corrupted META (e.g. status flipped to "closed" by a Git conflict)
+    // refuses the write instead of silently continuing a damaged topic.
+    const { topic, notes } = readActiveTopic(topicId);
+    const seq = notes.length > 0 ? notes[notes.length - 1].seq + 1 : 1;
 
     const note: Note = {
       seq,
@@ -134,12 +202,27 @@ export function postNote(topicId: string, author: string, content: string, opts?
       ...(opts?.priority && { priority: opts.priority }),
     };
 
+    // ADR-0020: guard BEFORE the append — a shape-invalid Note must never
+    // reach the file (e.g. author "" or an out-of-range timestamp).
+    const noteShapeIssue = validateNoteShape(note);
+    if (noteShapeIssue) {
+      throw new Error(`Note rejected before write on topic "${topicId}": ${noteShapeIssue}`);
+    }
+
     appendFileSync(jsonlPath, JSON.stringify(note) + "\n", "utf-8");
 
-    // Re-render board.md
-    const topic = getTopicMeta(topicId);
-    const allNotes = readNotes(topicId);
-    renderBoardMd(topicId, topic, allNotes);
+    // ADR-0020: post-write verification — re-read the file and confirm the
+    // new note is really there, comparing the FULL note shape (not just
+    // length and seq). A write that left the bytes unchanged (silent append
+    // failure) must never pass as accepted.
+    const after = readActiveTopic(topicId);
+    const persisted = after.notes[after.notes.length - 1];
+    if (after.notes.length !== notes.length + 1 || JSON.stringify(persisted) !== JSON.stringify(note)) {
+      throw new Error(`Topic "${topicId}" append verification failed: note #${seq} not persisted intact`);
+    }
+
+    // Re-render board.md from the verified snapshot.
+    renderBoardMd(topicId, after.topic, after.notes);
 
     appendEvent("board_post", { topic: topicId, seq, author });
     return note;
@@ -149,23 +232,20 @@ export function postNote(topicId: string, author: string, content: string, opts?
 }
 
 export function readNotes(topicId: string, since?: number): Note[] {
-  const jsonlPath = topicJsonlPath(topicId);
-  if (!existsSync(jsonlPath)) throw new Error(`Topic "${topicId}" not found`);
-
-  const lines = readFileSync(jsonlPath, "utf-8").split("\n").filter(l => l.trim());
-  const notes: Note[] = [];
-  for (const line of lines) {
-    if (line.startsWith("#META#")) continue;
-    const note = JSON.parse(line) as Note;
-    if (since === undefined || note.seq > since) {
-      notes.push(note);
-    }
-  }
-  return notes;
+  const { notes } = readActiveTopic(topicId);
+  return since === undefined ? notes : notes.filter(note => note.seq > since);
 }
 
-/** Read one closed topic from its immutable archive JSONL. */
-export function readArchivedTopic(topicId: string): { topic: Topic; notes: Note[] } {
+/**
+ * Read one closed topic from its immutable archive JSONL. The third field
+ * carries the cross-check state so callers can distinguish "verified" from
+ * "legacy-structured" from "unverified" instead of treating all no-issue
+ * reads as equally trustworthy.
+ */
+export function readArchivedTopic(topicId: string): { topic: Topic; notes: Note[]; integrity: WitnessKind } {
+  // ADR-0020: the archive must be an intact prefix of the close-time history.
+  // seq continuity alone misses tail truncation; the summary cross-check catches it.
+  const report = assertArchivedTopicIntact(topicId);
   const jsonlPath = archivedTopicJsonlPath(topicId);
   const lines = readFileSync(jsonlPath, "utf-8").split("\n").filter(line => line.trim());
   const metaLine = lines[0];
@@ -179,6 +259,7 @@ export function readArchivedTopic(topicId: string): { topic: Topic; notes: Note[
   return {
     topic,
     notes: lines.slice(1).map(line => JSON.parse(line) as Note),
+    integrity: report.witnessKind,
   };
 }
 
@@ -189,9 +270,8 @@ export function listTopics(): TopicMeta[] {
 
   for (const file of files) {
     const topicId = file.replace(".jsonl", "");
-    const meta = getTopicMeta(topicId);
-    const notes = readNotes(topicId);
-    topics.push({ ...meta, noteCount: notes.length });
+    const { topic, notes } = readActiveTopic(topicId);
+    topics.push({ ...topic, noteCount: notes.length });
   }
 
   // Also check archive
@@ -200,13 +280,16 @@ export function listTopics(): TopicMeta[] {
     const archiveFiles = readdirSync(archiveDir).filter(f => f.endsWith(".jsonl"));
     for (const file of archiveFiles) {
       const topicId = file.replace(".jsonl", "");
+      // ADR-0020: a corrupted archive must abort the listing rather than
+      // surface a silently truncated note count.
+      const report = assertArchivedTopicIntact(topicId);
       const jsonlPath = join(archiveDir, `${topicId}.jsonl`);
       const lines = readFileSync(jsonlPath, "utf-8").split("\n").filter(l => l.trim());
       const metaLine = lines.find(l => l.startsWith("#META#"));
       if (metaLine) {
         const meta = JSON.parse(metaLine.slice(6)) as Topic;
         const noteCount = lines.filter(l => !l.startsWith("#META#")).length;
-        topics.push({ ...meta, noteCount });
+        topics.push({ ...meta, noteCount, integrity: report.witnessKind });
       }
     }
   }
@@ -226,8 +309,8 @@ export function listOpenTopics(): Topic[] {
   for (const file of files) {
     const topicId = file.slice(0, -".jsonl".length);
     try {
-      const topic = getTopicMeta(topicId);
-      if (topic.status === "open") topics.push(topic);
+      const { topic } = readActiveTopic(topicId);
+      topics.push(topic);
     } catch (error: any) {
       if (error?.code === "ENOENT") continue;
       throw error;
@@ -244,10 +327,10 @@ export function closeTopic(topicId: string): { summary: string; decisions: strin
   }
   try {
     if (!existsSync(jsonlPath)) throw new Error(`Topic "${topicId}" not found`);
-    const topic = getTopicMeta(topicId);
-    if (topic.status === "closed") throw new Error(`Topic "${topicId}" is already closed`);
-
-    const notes = readNotes(topicId);
+    // ADR-0020: readActiveTopic enforces status === "open" here, so a META
+    // flipped to "closed" by an external rewrite fails the close instead of
+    // archiving a corrupted file.
+    const { topic, notes } = readActiveTopic(topicId);
     const summary = generateSummary(topic, notes);
     const decisions = generateDecisions(topic, notes);
 
@@ -266,7 +349,15 @@ export function closeTopic(topicId: string): { summary: string; decisions: strin
       );
     }
 
-    const closedTopic: Topic = { ...topic, status: "closed", closedAt: Date.now() };
+    const closedTopic: Topic = {
+      ...topic,
+      status: "closed",
+      closedAt: Date.now(),
+      // ADR-0020: the META itself carries the machine witness, so a summary
+      // witness deleted later cannot downgrade a v1 archive to "legacy".
+      integrityVersion: 1,
+      finalSeq: notes.length,
+    };
     const lines = readFileSync(jsonlPath, "utf-8").split("\n");
     lines[0] = `#META#${JSON.stringify(closedTopic)}`;
     writeFileSync(jsonlPath, lines.join("\n"), "utf-8");
@@ -289,35 +380,6 @@ export function closeTopic(topicId: string): { summary: string; decisions: strin
 }
 
 // Helper functions
-function readTopicMetaLine(jsonlPath: string): string {
-  const fd = openSync(jsonlPath, "r");
-  const chunks: Buffer[] = [];
-  let position = 0;
-  try {
-    while (true) {
-      const buffer = Buffer.allocUnsafe(1024);
-      const bytesRead = readSync(fd, buffer, 0, buffer.length, position);
-      if (bytesRead === 0) break;
-      const newline = buffer.indexOf(0x0a, 0);
-      chunks.push(buffer.subarray(0, newline >= 0 && newline < bytesRead ? newline : bytesRead));
-      if (newline >= 0 && newline < bytesRead) break;
-      position += bytesRead;
-    }
-  } finally {
-    closeSync(fd);
-  }
-  return Buffer.concat(chunks).toString("utf-8");
-}
-
-function getTopicMeta(topicId: string): Topic {
-  const jsonlPath = topicJsonlPath(topicId);
-  const firstLine = readTopicMetaLine(jsonlPath);
-  if (!firstLine.startsWith("#META#")) {
-    throw new Error(`Invalid topic file: missing META line for "${topicId}"`);
-  }
-  return JSON.parse(firstLine.slice(6)) as Topic;
-}
-
 function renderBoardMd(topicId: string, topic: Topic, notes: Note[]): void {
   let md = `# Topic: ${topicId}\n\n`;
   md += `**Goal**: ${topic.goal}\n`;
@@ -349,7 +411,12 @@ function renderBoardMd(topicId: string, topic: Topic, notes: Note[]): void {
 }
 
 function generateSummary(topic: Topic, notes: Note[]): string {
-  let md = `# Summary: ${topic.id}\n\n`;
+  // Machine witness MUST be the very first line, before any user-controlled
+  // field (goal is a free multi-line string and could otherwise inject a
+  // forged "**Total Notes**: 999" or a "##" heading that hides the real
+  // header from the integrity cross-check).
+  let md = `<!-- PI_BOARD_SUMMARY v1 totalNotes=${notes.length} -->\n`;
+  md += `# Summary: ${topic.id}\n\n`;
   md += `**Goal**: ${topic.goal}\n`;
   md += `**Duration**: ${new Date(topic.createdAt).toISOString()} → ${new Date(Date.now()).toISOString()}\n`;
   md += `**Total Notes**: ${notes.length}\n`;

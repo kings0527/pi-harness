@@ -498,8 +498,10 @@ test("open topic 正文损坏时延后首次 checkpoint，不声明空 Board", (
     });
     assert.equal(delivery.mode, "none");
     assert.equal(delivery.content, "");
+    // ADR-0020: listOpenTopics now validates full bodies up front, so the
+    // failure surfaces at listing time instead of per-topic snapshot reads.
     assert.deepEqual(delivery.warnings, [
-      "open topic corrupt-topic body read failed; checkpoint deferred",
+      'open-topic listing failed: Topic "corrupt-topic" JSONL is corrupted: line 2 is not valid JSON',
     ]);
   } finally {
     rmSync(path, { force: true });
