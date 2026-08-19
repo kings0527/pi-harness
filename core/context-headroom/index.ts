@@ -76,6 +76,9 @@ interface OutputBudgetLocation {
 }
 
 // These are the payload shapes emitted by pi-ai's supported adapters.
+// The first three are fieldless-family overrides; OpenAI-completions keeps
+// minimum 1 but the runtime clamp below enforces a 16-token floor so a
+// last-mile clamp can never produce a useless 1-token completion.
 const OUTPUT_BUDGET_LOCATIONS: readonly OutputBudgetLocation[] = [
   { path: ["max_tokens"], minimum: 1 },
   { path: ["max_completion_tokens"], minimum: 1 },
@@ -183,7 +186,7 @@ export function clampProviderOutputBudget(
   );
   const providerMinimum = thinkingBudget
     ? Math.max(location.minimum, 2_048)
-    : location.minimum;
+    : Math.max(location.minimum, 16);
   const allowedTokens = Math.max(
     providerMinimum,
     Math.floor(contextWindow - contextTokens - scaledSafetyTokens),

@@ -176,6 +176,43 @@ test("P2 回归：.pi-board 目录已删但仍在 index — 告警且事件落�
   }
 });
 
+test("git 缺失的 session 被记住：后续 session_start 不再重复 spawn", async () => {
+  const plainDir = mkdtempSync(join(tmpdir(), "pi-harness-board-integrity-nogitbinary-"));
+  const originalPath = process.env.PATH;
+  // Remove every PATH segment containing a git executable so spawnSync("git")
+  // fails with ENOENT — the definitive "git cannot appear" outcome.
+  const noGitPath = (originalPath ?? "")
+    .split(":")
+    .filter(segment => !segment || spawnSync("test", ["-x", `${segment}/git`]).status !== 0)
+    .join(":");
+  const trackedRepo = mkdtempSync(join(tmpdir(), "pi-harness-board-integrity-tracked-"));
+  try {
+    process.env.PATH = noGitPath;
+    await fireAsync("session_start", {}, makeCtx("s-git-missing", plainDir));
+
+    // The same session later, with git restored and a repo that genuinely
+    // tracks .pi-board: the remembered ENOENT outcome keeps the hook silent.
+    process.env.PATH = originalPath;
+    const initResult = spawnSync("git", ["init", "-q"], { cwd: trackedRepo, encoding: "utf-8" });
+    assert.equal(initResult.status, 0);
+    mkdirSync(join(trackedRepo, ".pi-board"), { recursive: true });
+    writeFileSync(join(trackedRepo, ".pi-board", "events.jsonl"), "", "utf-8");
+    const addResult = spawnSync("git", ["add", ".pi-board/events.jsonl"], { cwd: trackedRepo, encoding: "utf-8" });
+    assert.equal(addResult.status, 0);
+
+    await fireAsync("session_start", {}, makeCtx("s-git-missing", trackedRepo));
+    assert.equal(
+      gitWarns().filter(w => w.details.session === "s-git-missing").length,
+      0,
+      "git-missing session stays silent even after git returns",
+    );
+  } finally {
+    process.env.PATH = originalPath;
+    rmSync(plainDir, { recursive: true, force: true });
+    rmSync(trackedRepo, { recursive: true, force: true });
+  }
+});
+
 test("PI_BOARD_INTEGRITY_DISABLED=1 完全静默", async () => {
   process.env.PI_BOARD_INTEGRITY_DISABLED = "1";
   git(["add", "-f", ".pi-board/events.jsonl"]);

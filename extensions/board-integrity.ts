@@ -28,15 +28,15 @@ const cleanOrWarnedSessions = new Set<string>();
 
 function getSessionId(ctx: any): string {
   // PI_SESSION_ID is injected into Bash child processes, NOT into the
-  // extension process env. The authoritative session id comes from ctx.
+  // extension process env. The authoritative session id comes from ctx;
+  // sessions without a manager get a per-process fallback.
   return (
     ctx?.sessionManager?.getSessionId?.() ??
-    process.env.PI_SESSION_ID ??
     `pid-${process.pid}`
   );
 }
 
-function gitLsBoardFiles(cwd: string): { inRepo: boolean; tracked: string[] } {
+function gitLsBoardFiles(cwd: string): { inRepo: boolean; tracked: string[]; gitMissing?: boolean } {
   // Not a repo / git missing / error → nothing to warn about. The Board
   // store only faces last-write-wins rollback inside a Git worktree.
   const result = spawnSync("git", ["ls-files", "--", ".pi-board"], {
@@ -44,7 +44,10 @@ function gitLsBoardFiles(cwd: string): { inRepo: boolean; tracked: string[] } {
     encoding: "utf-8",
     timeout: 5000,
   });
-  if (result.error || result.status !== 0) return { inRepo: false, tracked: [] };
+  if (result.error) {
+    return { inRepo: false, tracked: [], gitMissing: (result.error as NodeJS.ErrnoException)?.code === "ENOENT" };
+  }
+  if (result.status !== 0) return { inRepo: false, tracked: [] };
   return { inRepo: true, tracked: boardTrackedPaths(result.stdout) };
 }
 
@@ -56,8 +59,14 @@ export default async function (pi: any) {
     if (cleanOrWarnedSessions.has(sessionId)) return;
 
     const cwd = ctx?.cwd || process.cwd();
-    const { inRepo, tracked } = gitLsBoardFiles(cwd);
-    if (!inRepo) return; // git transiently failed / not a repo: retry next session
+    const { inRepo, tracked, gitMissing } = gitLsBoardFiles(cwd);
+    if (!inRepo) {
+      // Only git itself being absent is definitive: no repo can ever appear
+      // under this session without re-running the hook. Transient failures
+      // (timeout, locked index) stay unremembered and retry next session.
+      if (gitMissing) cleanOrWarnedSessions.add(sessionId);
+      return;
+    }
 
     if (tracked.length > 0) {
       const message =

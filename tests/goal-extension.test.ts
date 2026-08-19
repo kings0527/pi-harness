@@ -133,6 +133,16 @@ test("/goal <objective> persists the visible command and starts execution immedi
 
   assert.equal(goal.getGoal(sessionId)?.text, "execute this objective");
   assert.deepEqual(sentUserMessages, [{ content: "/goal execute this objective", options: undefined }]);
+
+  // The echoed command turn is goal setup, not goal work: its first
+  // before_agent_start must not advance the turn counter.
+  const echoResults = await startTurn(sessionId, "/goal execute this objective");
+  assert.equal(goalMessage(echoResults), undefined, "echo turn must not inject a goal message");
+  assert.equal(goal.getGoal(sessionId)?.userTurnCount, 0, "echo turn must not count as goal work");
+
+  const realResults = await startTurn(sessionId, "real work");
+  assert.ok(goalMessage(realResults));
+  assert.equal(goal.getGoal(sessionId)?.userTurnCount, 1);
 });
 
 test("/goal waits for an active run to settle before starting the replacement objective", async () => {

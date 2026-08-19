@@ -142,6 +142,51 @@ export function beginGoalTurn(sessionId: string, expectedGoalId: string): GoalSt
   return persistPatch(current, { userTurnCount: current.userTurnCount + 1 });
 }
 
+/**
+ * Advance exactly once for one real user prompt. A registered echo prompt
+ * (the /goal command re-submitted by the handler itself) is consumed and
+ * skipped once: the command turn is goal setup, not goal work.
+ */
+export function beginGoalTurnOnce(
+  sessionId: string,
+  expectedGoalId: string,
+  prompt?: string,
+): GoalState | null {
+  const current = getGoal(sessionId);
+  if (!current || current.status !== "active" || current.id !== expectedGoalId) return null;
+  const key = echoPromptKey(sessionId, current.id, prompt);
+  if (consumedEchoPrompts.has(key)) {
+    consumedEchoPrompts.delete(key);
+    return null;
+  }
+  return persistPatch(current, { userTurnCount: current.userTurnCount + 1 });
+}
+
+/**
+ * Register the re-submitted /goal command turn so its first
+ * before_agent_start does not double-count as goal work. Registered before
+ * pi.sendUserMessage so the echo turn is the one that consumes it.
+ */
+export function registerEchoPrompt(sessionId: string, goalId: string, prompt: string): void {
+  consumedEchoPrompts.add(echoPromptKey(sessionId, goalId, prompt));
+  // FIFO-evict the oldest entries (Set iterates in insertion order) so a
+  // just-registered echo is never evicted before its turn consumes it.
+  while (consumedEchoPrompts.size > 512) {
+    const oldest = consumedEchoPrompts.values().next().value;
+    if (oldest === undefined) break;
+    consumedEchoPrompts.delete(oldest);
+  }
+}
+
+function echoPromptKey(sessionId: string, goalId: string, prompt?: string): string {
+  return `${sessionId}\n${goalId}\n${typeof prompt === "string" ? prompt : ""}`;
+}
+
+// Prompts whose first before_agent_start has already been consumed by an
+// extension-originated re-submission. Bounded per process (Pi is long-lived;
+// the set resets with the runtime, not per session).
+const consumedEchoPrompts = new Set<string>();
+
 export function goalEvidenceTag(goalId: string): string {
   return `goal:${goalId}`;
 }

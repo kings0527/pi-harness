@@ -216,6 +216,12 @@ export default async function (pi: any) {
     for (const key of fieldlessWarnings) {
       if (key.startsWith(`${id}:`)) fieldlessWarnings.delete(key);
     }
+    // A just-shutdown session may still be draining its provider stream;
+    // newSession() against a streaming predecessor is rejected by Pi. Wait
+    // for the actual idle boundary before touching ctx.compact() so the
+    // proactive check neither races the predecessor nor fires while
+    // pre-compaction state is inconsistent.
+    if (!ctx?.isIdle?.()) await ctx.waitForIdle();
     const compaction = beginCompaction(ctx, "session_start");
     // Pi 0.84 rejects prompt() before the input hook while a manual
     // compaction controller exists. Keep session initialization pending until

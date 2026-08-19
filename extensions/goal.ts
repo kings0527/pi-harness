@@ -2,13 +2,14 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { assessContextSize } from "../core/context-size/index.ts";
 import { appendEvent } from "../core/events/index.ts";
 import {
-  beginGoalTurn,
+  beginGoalTurnOnce,
   clearGoal,
   completeGoalFromBoardNote,
   createGoalReferenceSnapshot,
   getGoal,
   goalEvidenceTag,
   pauseGoal,
+  registerEchoPrompt,
   resumeGoal,
   setGoal,
   GOAL_MET_TAG,
@@ -137,7 +138,11 @@ export default async function goalExtension(pi: ExtensionAPI) {
       if (!ctx.isIdle()) await ctx.waitForIdle();
       const latest = getGoal(id);
       if (latest?.id === goal.id && latest.status === "active") {
-        pi.sendUserMessage(`/goal ${trimmed}`);
+        const echoedPrompt = `/goal ${trimmed}`;
+        // The re-submitted command itself is a user turn; its first
+        // before_agent_start must not double-count as goal work.
+        registerEchoPrompt(id, latest.id, echoedPrompt);
+        pi.sendUserMessage(echoedPrompt);
       }
     },
     getArgumentCompletions(prefix) {
@@ -149,7 +154,7 @@ export default async function goalExtension(pi: ExtensionAPI) {
 
   // Persist only state changes. Rewriting/moving an ephemeral goal message would
   // cut the provider cache prefix at the previous user turn (ADR-0016).
-  pi.on("before_agent_start", async (_event, ctx) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     const id = sessionId(ctx);
     const current = getGoal(id);
     const latestActive = latestGoalMarker(ctx.sessionManager.buildContextEntries());
@@ -170,7 +175,7 @@ export default async function goalExtension(pi: ExtensionAPI) {
       return { message: inactiveGoalMessage(id, basis, status) };
     }
 
-    const advanced = beginGoalTurn(id, current.id);
+    const advanced = beginGoalTurnOnce(id, current.id, event?.prompt);
     if (!advanced) {
       return;
     }
