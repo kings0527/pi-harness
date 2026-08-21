@@ -26,7 +26,7 @@ test("完整常驻 prompt + doctrine inline + tool descriptions 保持在保守�
   assert.ok(estimateContextTokens(corpus) <= 900, "keep headroom below the 1000-token invariant");
 });
 
-test("ADR-0011 through ADR-0019 遵守十行格式", () => {
+test("ADR-0011 through ADR-0021 遵守十行格式", () => {
   for (const path of [
     "docs/decisions/0011-fixed-knowledge-handoff-placement.md",
     "docs/decisions/0012-preserve-context-warn-on-size.md",
@@ -38,6 +38,7 @@ test("ADR-0011 through ADR-0019 遵守十行格式", () => {
     "docs/decisions/0018-board-checkpoint-delta-feed.md",
     "docs/decisions/0019-context-headroom-guard.md",
     "docs/decisions/0020-board-integrity-guard.md",
+    "docs/decisions/0021-proactive-reasoning-epochs.md",
   ]) {
     assert.ok(read(path).trimEnd().split("\n").length <= 10, `${path} exceeds 10 lines`);
   }

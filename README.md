@@ -34,6 +34,7 @@ pi install github:kings0527/pi-harness         # 从 GitHub
 - **完整上下文**：knowledge index、Board notes 与 subagent 输出保持完整；估算达到当前模型窗口 20% 时仅告警，提示检查过期、错误、重复或过长内容。
 - **稳定且可审计的注入**：knowledge 与 Board 独立持久；Board 对当前 session 参与的 topic 在 active context 先发一次 checkpoint，后续只按 topic `seq` 追加 delta，压缩后 checkpoint 缺失才重发全量。参与关系以 session entry 保存；每份实际注入的精确字节写入 `.pi-board/context-snapshots/`，CRITICAL note 保持带来源可见。
 - **上下文 headroom 护栏**：在 session start、agent settled 和 idle input 边界同时预留 completion + 新输入空间，先于 Pi 默认阈值压缩；session/settled 边界等待压缩结算，越线 input 在自己的原管线内等待（保留 skill/template 展开），non-idle steer/followUp/缺参保持 Pi 原始时机；同 session 额外并发 idle input 不竞争 agent run，而是原样持久化并显式提示重试；最后竞态仅联动收紧 provider 已有 output/thinking budget，无可调字段时显式告警。
+- **主动 reasoning epoch**：不检查括号、短句或其他输出风格；每累计 32K reasoning tokens，就在下一次 provider 调用前插入持久 epoch 边界。已完成 epoch 的 raw thinking 与 opaque reasoning signature 不再回放，当前尚未消费的 tool-call 协议只桥接一次；原 session JSONL、用户文本、可见结论、工具调用/结果、Board、knowledge 与 artifacts 保持完整。可用 `PI_REASONING_EPOCH_TOKENS` 调整预算（下限 1024）。
 
 ### 哲学层：Discipline + Doctrine
 
@@ -70,6 +71,7 @@ extensions/          ← pi 薄适配层（工具注册 + hooks，唯一接触 p
   storm.ts           /storm 命令注册
   context-feed.ts    冻结、审计并追加 knowledge + Board checkpoint/delta
   context-headroom.ts 提前压缩 + provider output 边界护栏
+  reasoning-epoch.ts 固定预算推理分代 + completed-thinking provider 隔离
   discipline.ts      纪律 hooks（read-before-write, fail-loud, diff-scope）
   convergence.ts     收敛门禁（close 前置校验 + spawn 轮次护栏）
   doctrine.ts        常驻认知注入（before_agent_start）
@@ -77,6 +79,7 @@ core/                ← 纯 Node.js，runtime 无关（零 pi import）
   board/             黑板逻辑 + digest 生成
   context-reference/ knowledge/Board 分层选择与 reference 格式化
   context-headroom/  completion/ingress 预留与 output-only clamp 决策
+  reasoning-epoch/   推理 token 计量、epoch 隔离与 checkpoint 策略
   context-size/      上下文体积估算与告警阈值
   context-snapshot/  注入内容寻址快照
   knowledge/         知识库读写
@@ -111,6 +114,7 @@ docs/decisions/      ← 架构决策记录（ADR）
 - **判断归 LLM，约束归代码**：hook 只强制不可违反的硬约束，语义判断留给 LLM。
 - **渐进披露**：工具 description 极小，skill 正文按需加载。
 - **证据完整**：运行时不静默截断诊断与协作内容；体积过大时显式告警并保留原文。
+- **scratchpad 分代**：raw thinking 仍完整留在可审计 session 文件中，但不作为跨 epoch 的持久证据或模仿样本回放。
 
 ## ADR（架构决策）
 
@@ -134,6 +138,8 @@ docs/decisions/      ← 架构决策记录（ADR）
 - **0017**: Knowledge catalog 常驻，目录正文按访问渐进披露，启动阶段零递归扫描
 - **0018**: Board 每个 active context 一次 checkpoint，后续按 topic seq 追加 delta
 - **0019**: 输出感知的 context headroom，提前压缩并以 output-only clamp 兜底
+- **0020**: Board append-only 完整性护栏
+- **0021**: 固定 token 预算主动切换 reasoning epoch，压缩前移除 scratchpad
 
 ## 开发
 

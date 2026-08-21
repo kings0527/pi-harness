@@ -369,6 +369,8 @@ test("idle 普通输入先压缩再恢复原 input 管线", async () => {
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(resolved, false);
   assert.equal(compactCalls.length, 1);
+  assert.match(compactCalls[0].customInstructions, /durable task state/);
+  assert.match(compactCalls[0].customInstructions, /Exclude scratchpad prose/);
   compactCalls[0].onComplete({ estimatedTokensAfter: 20_000 });
   assert.deepEqual(await input, [undefined]);
   assert.deepEqual(harness.sent, [], "original prompt retains text and images without extension replay");

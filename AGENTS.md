@@ -19,6 +19,8 @@
    at an estimated 20% of the active model window, runtime emits one warning and preserves all content (ADR-0012).
    Passive references freeze per user turn and exact bytes persist in `.pi-board/context-snapshots/`; CRITICAL notes
    become visible, provenance-bearing messages instead of hidden references (ADR-0013).
+   Completed raw thinking is the sole exception: it stays intact in session JSONL for audit but is removed from later
+   provider epochs and summarizer inputs; all durable evidence remains complete (ADR-0021).
 4. Board storage: `.pi-board/` (project-local, append-only JSONL + markdown snapshots).
 5. Fixed placement (ADR-0014): project knowledge ONLY at the pi session root, workspace knowledge ONLY at the
    nearest Git root, global knowledge ONLY under `~/.pi-harness/`; context deduplicates identical roots and never
@@ -28,6 +30,8 @@
    tool calls identical to the immediately previous one (operator-visible via stderr + events.jsonl).
    It does NOT inject into model context, count steps/tokens, or auto-escalate to any strict mode.
    The 4-rule prompt is always-on judgment guidance; the full reference skill loads only on description match.
+8. Reasoning epochs are proactive capacity boundaries, not drift detectors: default 32K reasoning tokens, one
+   protocol-valid bridge for the just-finished tool call, then no completed scratchpad/signature replay (ADR-0021).
 
 ## Development Commands
 

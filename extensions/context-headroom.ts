@@ -4,6 +4,7 @@ import {
 } from "../core/context-headroom/index.ts";
 import { estimateContextTokens } from "../core/context-size/index.ts";
 import { appendEvent } from "../core/events/index.ts";
+import { REASONING_CHECKPOINT_INSTRUCTIONS } from "../core/reasoning-epoch/index.ts";
 
 const ESTIMATED_IMAGE_TOKENS = 1_600;
 
@@ -201,7 +202,11 @@ export default async function (pi: any) {
       settle();
     };
     try {
-      ctx.compact({ onComplete: finish, onError: fail });
+      ctx.compact({
+        customInstructions: REASONING_CHECKPOINT_INSTRUCTIONS,
+        onComplete: finish,
+        onError: fail,
+      });
     } catch (error: any) {
       fail(error instanceof Error ? error : new Error(String(error)));
     }
