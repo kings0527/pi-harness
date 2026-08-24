@@ -39,6 +39,10 @@ test("ADR-0011 through ADR-0021 遵守十行格式", () => {
     "docs/decisions/0019-context-headroom-guard.md",
     "docs/decisions/0020-board-integrity-guard.md",
     "docs/decisions/0021-proactive-reasoning-epochs.md",
+    "docs/decisions/0022-goal-auto-continuation.md",
+    "docs/decisions/0023-session-cumulative-reasoning-epochs.md",
+    "docs/decisions/0024-early-compaction-headroom.md",
+    "docs/decisions/0025-reasoning-epoch-observation.md",
   ]) {
     assert.ok(read(path).trimEnd().split("\n").length <= 10, `${path} exceeds 10 lines`);
   }
@@ -57,7 +61,10 @@ test("runtime references are append-only across user turns and goal completion i
   const contextSource = read("extensions/context-feed.ts");
   assert.match(source, /pi\.on\("before_agent_start"/);
   assert.match(source, /pi\.on\("tool_result"/);
-  assert.doesNotMatch(source, /pi\.on\("tool_call"|STALL_THRESHOLD|pi\.sendMessage/);
+  // ADR-0022: continuation uses the agent_end steering channel only — never
+  // preflight tool_call hooks and never a fixed stall threshold.
+  assert.match(source, /pi\.on\("agent_end"/);
+  assert.doesNotMatch(source, /pi\.on\("tool_call"|STALL_THRESHOLD/);
   assert.doesNotMatch(source, /messages\.splice/);
   assert.doesNotMatch(contextSource, /pi\.on\("context"|messages\.splice/);
 });

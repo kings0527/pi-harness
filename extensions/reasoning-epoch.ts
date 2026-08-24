@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { appendEvent } from "../core/events/index.ts";
 import {
+  analyzeThinking,
   createReasoningEpochMarker,
   estimateMessageReasoningTokens,
   hasToolCall,
@@ -15,6 +16,15 @@ import {
 
 interface ReasoningEpochOptions {
   tokenBudget?: number;
+  /** ADR-0025 A/B arm: false keeps completed reasoning in provider context (protocol-compliant). */
+  strip?: boolean;
+}
+
+function resolveStrip(raw: string | undefined, explicit: boolean | undefined): boolean {
+  if (explicit !== undefined) return explicit;
+  if (raw === undefined) return true;
+  const value = raw.trim().toLowerCase();
+  return !(value === "0" || value === "false" || value === "off" || value === "no");
 }
 
 function sessionId(ctx: ExtensionContext): string {
@@ -38,15 +48,20 @@ export function createReasoningEpochExtension(options: ReasoningEpochOptions = {
   const tokenBudget = resolveReasoningEpochTokenBudget(
     options.tokenBudget ?? process.env.PI_REASONING_EPOCH_TOKENS,
   );
+  const stripActive = resolveStrip(process.env.PI_REASONING_EPOCH_STRIP, options.strip);
 
   return async function reasoningEpochExtension(pi: ExtensionAPI) {
+    // ADR-0023: cumulative reasoning tokens since the last rotation, never
+    // reset by user-like boundaries, so long multi-turn sessions rotate too.
     const reasoningTokensBySession = new Map<string, number>();
+    const nextRotationBySession = new Map<string, number>();
     const queuedEpochs = new Set<string>();
     const protocolBridges = new Set<string>();
 
     const clearSession = (ctx: ExtensionContext) => {
       const id = sessionId(ctx);
       reasoningTokensBySession.delete(id);
+      nextRotationBySession.delete(id);
       queuedEpochs.delete(id);
       protocolBridges.delete(id);
     };
@@ -58,7 +73,8 @@ export function createReasoningEpochExtension(options: ReasoningEpochOptions = {
       const message = event.message as unknown as ReasoningMessage;
       const id = sessionId(ctx);
       if (isUserLikeBoundary(message)) {
-        reasoningTokensBySession.set(id, 0);
+        // A boundary closes pending rotation state and re-arms the tool
+        // protocol bridge, but never resets the session budget (ADR-0023).
         queuedEpochs.delete(id);
         if (message.role === "custom" && message.customType === REASONING_EPOCH_MESSAGE_TYPE) {
           // The first provider call after a marker also carries the tool result
@@ -73,25 +89,44 @@ export function createReasoningEpochExtension(options: ReasoningEpochOptions = {
       }
       if (message.role !== "assistant") return;
 
+      // ADR-0025: audit every assistant message so telegraphic density can be
+      // correlated with request context size over long A/B sessions.
+      try {
+        const usage = message.usage as { input?: unknown } | null | undefined;
+        const contextTokens = typeof usage?.input === "number" && Number.isFinite(usage.input) && usage.input > 0
+          ? Math.floor(usage.input)
+          : undefined;
+        appendEvent("thinking_observation", {
+          session: id,
+          stripActive,
+          ...analyzeThinking(message),
+          ...(contextTokens === undefined ? {} : { contextTokens }),
+        });
+      } catch {
+        // Observation must not depend on diagnostics storage.
+      }
+
       if (message.stopReason !== "error" && message.stopReason !== "aborted") {
         protocolBridges.delete(id);
       }
 
-      const reasoningTokens = (reasoningTokensBySession.get(id) ?? 0)
+      const cumulative = (reasoningTokensBySession.get(id) ?? 0)
         + estimateMessageReasoningTokens(message);
-      reasoningTokensBySession.set(id, reasoningTokens);
-      if (reasoningTokens < tokenBudget || !hasToolCall(message) || queuedEpochs.has(id)) return;
+      reasoningTokensBySession.set(id, cumulative);
+      const nextRotation = nextRotationBySession.get(id) ?? tokenBudget;
+      if (cumulative < nextRotation || !hasToolCall(message) || queuedEpochs.has(id)) return;
 
       queuedEpochs.add(id);
-      const marker = createReasoningEpochMarker(reasoningTokens, tokenBudget);
+      nextRotationBySession.set(id, cumulative + tokenBudget);
+      const marker = createReasoningEpochMarker(cumulative, tokenBudget, stripActive);
       pi.sendMessage(marker, { deliverAs: "steer" });
       console.error(
-        `[reasoning-epoch] Rotating before the next provider call at ${reasoningTokens}/${tokenBudget} reasoning tokens; durable task evidence remains in context.`,
+        `[reasoning-epoch] Rotating before the next provider call at ${cumulative}/${tokenBudget} cumulative reasoning tokens; durable task evidence remains in context.`,
       );
       try {
         appendEvent("reasoning_epoch_queued", {
           session: id,
-          reasoningTokens,
+          reasoningTokens: cumulative,
           tokenBudget,
         });
       } catch {
@@ -100,6 +135,10 @@ export function createReasoningEpochExtension(options: ReasoningEpochOptions = {
     });
 
     pi.on("context", async (event, ctx) => {
+      // ADR-0025: the strip arm is off (PI_REASONING_EPOCH_STRIP=0/false/off),
+      // completed reasoning stays in provider context — DeepSeek-format
+      // endpoints require reasoning_content on assistant messages.
+      if (!stripActive) return;
       const id = sessionId(ctx);
       const messages = stripCompletedEpochThinking(event.messages, {
         preserveToolProtocolBridge: protocolBridges.has(id),

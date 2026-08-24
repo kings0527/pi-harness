@@ -14,6 +14,7 @@ import { appendEvent } from "../events/index.ts";
 import { ensureDir, getStorageRoot } from "../storage/index.ts";
 
 export const GOAL_MET_TAG = "goal-met";
+export const GOAL_AUTO_CONTINUE_LIMIT = 4;
 
 export interface GoalEvidence {
   topic: string;
@@ -259,6 +260,37 @@ export function renderGoalReference(goal: GoalState): string {
     `<objective>${escapeXml(goal.text)}</objective>`,
     `<completion required_tags="${GOAL_MET_TAG} ${escapeXml(evidenceTag)}">When fully achieved, post a Board note containing completion evidence with both required tags.</completion>`,
     "</active_goal>",
+  ].join("\n");
+}
+
+/**
+ * Whether an ended agent turn should be resumed automatically toward the
+ * active goal. Pure policy so the extension stays a thin wiring layer.
+ */
+export function shouldAutoContinueGoal(
+  goal: GoalState | null,
+  stopReason: string | undefined,
+  autoContinuesUsed: number,
+  limit: number = GOAL_AUTO_CONTINUE_LIMIT,
+): boolean {
+  if (!goal || goal.status !== "active") return false;
+  if (stopReason === "error" || stopReason === "aborted") return false;
+  return autoContinuesUsed < limit;
+}
+
+/**
+ * Steer payload re-asserting the objective after a reporting turn ended.
+ * Not a new user request: it only re-activates the same execution policy.
+ */
+export function renderGoalContinueMessage(goal: GoalState, attempt: number, limit: number): string {
+  const evidenceTag = goalEvidenceTag(goal.id);
+  return [
+    `<goal_continue id="${escapeXml(goal.id)}" scope="current-session" attempt="${attempt}" limit="${limit}">`,
+    "<instruction>This is an automatic continuation, not a new user request. The active goal is not achieved yet: keep working toward it instead of stopping to report progress.</instruction>",
+    `<objective>${escapeXml(goal.text)}</objective>`,
+    `<completion required_tags="${GOAL_MET_TAG} ${escapeXml(evidenceTag)}">When fully achieved, post a Board note containing completion evidence with both required tags.</completion>`,
+    "<blocker>If every meaningful route is blocked by missing information or permissions, state exactly what is missing and stop; do not fabricate progress.</blocker>",
+    "</goal_continue>",
   ].join("\n");
 }
 

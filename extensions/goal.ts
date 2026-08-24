@@ -10,13 +10,17 @@ import {
   goalEvidenceTag,
   pauseGoal,
   registerEchoPrompt,
+  renderGoalContinueMessage,
   resumeGoal,
   setGoal,
+  shouldAutoContinueGoal,
+  GOAL_AUTO_CONTINUE_LIMIT,
   GOAL_MET_TAG,
   type GoalReferenceSnapshot,
 } from "../core/goal/index.ts";
 
-const GOAL_MESSAGE_TYPE = "pi-harness-goal";
+export const GOAL_MESSAGE_TYPE = "pi-harness-goal";
+export const GOAL_CONTINUE_MESSAGE_TYPE = "pi-harness-goal-continue";
 const LEGACY_STATUS_MESSAGE_TYPE = "goal-status";
 const GOAL_SNAPSHOT_ENTRY_TYPE = "pi-harness-goal-snapshot";
 
@@ -86,6 +90,15 @@ function latestGoalMarker(entries: ReturnType<ExtensionContext["sessionManager"]
 
 export default async function goalExtension(pi: ExtensionAPI) {
   const warnedGoalIds = new Set<string>();
+  // Auto-continuations used since the last real user turn (ADR-0022).
+  const autoContinuations = new Map<string, number>();
+
+  const clearSession = (ctx: ExtensionContext) => {
+    autoContinuations.delete(sessionId(ctx));
+  };
+
+  pi.on("session_start", async (_event, ctx) => clearSession(ctx));
+  pi.on("session_shutdown", async (_event, ctx) => clearSession(ctx));
 
   pi.registerCommand("goal", {
     description: "Set a session-persistent execution goal. Usage: /goal <condition> | pause | resume | off | status",
@@ -126,6 +139,7 @@ export default async function goalExtension(pi: ExtensionAPI) {
       }
 
       const goal = setGoal(id, trimmed);
+      autoContinuations.set(id, 0);
       notify(
         ctx,
         `Goal set: ${goal.text}\nCompletion tags: ${GOAL_MET_TAG}, ${goalEvidenceTag(goal.id)}`,
@@ -179,6 +193,7 @@ export default async function goalExtension(pi: ExtensionAPI) {
     if (!advanced) {
       return;
     }
+    autoContinuations.set(id, 0);
 
     const snapshot = createGoalReferenceSnapshot(advanced);
     const metadata = {
@@ -254,5 +269,34 @@ export default async function goalExtension(pi: ExtensionAPI) {
         },
       ],
     };
+  });
+
+  // ADR-0022: a reporting turn must not end the goal. Queue a steer on the
+  // same delivery channel as reasoning-epoch markers, so pi resumes the
+  // agent instead of going idle; the per-user-turn cap bounds the loop.
+  pi.on("agent_end", async (event, ctx) => {
+    const id = sessionId(ctx);
+    const current = getGoal(id);
+    const lastMessage = Array.isArray(event?.messages)
+      ? (event.messages as unknown as Array<Record<string, unknown>>).at(-1)
+      : undefined;
+    const stopReason = (lastMessage as any)?.message?.stopReason ?? (lastMessage as any)?.stopReason;
+    const used = autoContinuations.get(id) ?? 0;
+    if (!current || !shouldAutoContinueGoal(current, stopReason, used)) return;
+    autoContinuations.set(id, used + 1);
+    const message = {
+      customType: GOAL_CONTINUE_MESSAGE_TYPE,
+      content: renderGoalContinueMessage(current, used + 1, GOAL_AUTO_CONTINUE_LIMIT),
+      display: false,
+      details: {
+        sessionId: id,
+        goalId: current.id,
+        status: "active",
+        autoContinue: used + 1,
+        limit: GOAL_AUTO_CONTINUE_LIMIT,
+        userTurnCount: current.userTurnCount,
+      },
+    };
+    pi.sendMessage(message, { deliverAs: "steer" });
   });
 }

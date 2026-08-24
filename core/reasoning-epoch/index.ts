@@ -56,6 +56,35 @@ export function estimateMessageReasoningTokens(message: ReasoningMessage): numbe
   return Math.max(positiveInteger(message.usage?.reasoning) ?? 0, estimated);
 }
 
+export interface ThinkingObservation {
+  thinkingChars: number;
+  /** Occurrences of the observed telegraphic shorthand marker "（——". */
+  telegraphicMarks: number;
+  /** Telegraphic marks per 1000 thinking characters; 0 when no thinking. */
+  telegraphicRatio: number;
+}
+
+/**
+ * ADR-0025: pure measurement of telegraphic thinking density, so long-run
+ * A/B sessions can correlate style degeneration with context size instead of
+ * guessing at the causal loop. No prose-pattern policy is applied here.
+ */
+export function analyzeThinking(message: ReasoningMessage): ThinkingObservation {
+  const reasoningText = contentBlocks(message)
+    .filter(block => block.type === "thinking" && typeof block.thinking === "string")
+    .map(block => block.thinking as string)
+    .join("\n");
+  const thinkingChars = reasoningText.length;
+  const telegraphicMarks = thinkingChars > 0
+    ? (reasoningText.match(/（——/g) ?? []).length
+    : 0;
+  return {
+    thinkingChars,
+    telegraphicMarks,
+    telegraphicRatio: thinkingChars > 0 ? (telegraphicMarks * 1000) / thinkingChars : 0,
+  };
+}
+
 export function hasToolCall(message: ReasoningMessage): boolean {
   return message.role === "assistant" && contentBlocks(message).some(block => block.type === "toolCall");
 }
@@ -151,12 +180,20 @@ export function stripCompletedEpochThinking<T extends ReasoningMessage>(
   return changed ? transformed : [...messages];
 }
 
-export function createReasoningEpochMarker(reasoningTokens: number, tokenBudget: number) {
+export function createReasoningEpochMarker(
+  reasoningTokens: number,
+  tokenBudget: number,
+  stripActive = true,
+) {
   return {
     customType: REASONING_EPOCH_MESSAGE_TYPE,
     content: [
       `<reasoning_epoch state="rotated" consumed_tokens="${Math.max(0, Math.floor(reasoningTokens))}" budget="${Math.max(1, Math.floor(tokenBudget))}">`,
-      "Previous hidden reasoning is closed. Continue from the durable task state already present: user requirements, visible conclusions, tool calls/results, Board and knowledge evidence, and artifacts.",
+      stripActive
+        ? "Previous hidden reasoning is closed and will be removed from the next provider context."
+        : "Previous hidden reasoning remains inspectable in context; do not let its shorthand style guide this pass.",
+      "If your current conclusions are not yet recorded as durable evidence, write a compact factual checkpoint now (Board note or file): verified facts, exact paths/commands/errors, rejected routes, and the next concrete test.",
+      "Then continue from the durable task state already present: user requirements, visible conclusions, tool calls/results, Board and knowledge evidence, and artifacts.",
       "Start a fresh reasoning pass for the next action. Do not reproduce or summarize the prior scratchpad.",
       "</reasoning_epoch>",
     ].join("\n"),
@@ -165,6 +202,7 @@ export function createReasoningEpochMarker(reasoningTokens: number, tokenBudget:
       kind: "reasoning-epoch",
       reasoningTokens: Math.max(0, Math.floor(reasoningTokens)),
       tokenBudget: Math.max(1, Math.floor(tokenBudget)),
+      stripActive,
     },
   };
 }

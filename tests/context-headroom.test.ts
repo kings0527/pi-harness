@@ -63,15 +63,57 @@ test("小窗口 ingress reserve 按比例缩放，不在半窗口提前压缩", 
   assert.equal(assessment.shouldCompact, false);
 });
 
-test("provider 实际观测额度高于 48K 时扩大后续 completion reserve", () => {
-  const assessment = assessContextHeadroom({
+test("观测额度真实且受 64K 上限约束，provider 默认 max_tokens 不再撑大 reserve", () => {
+  const inflated = assessContextHeadroom({
     contextTokens: 850_000,
     contextWindow: 1_000_000,
     modelMaxOutputTokens: 1_000_000,
-    observedMaxOutputTokens: 128_000,
+    observedMaxOutputTokens: 384_000,
   });
-  assert.equal(assessment.outputReserveTokens, 128_000);
-  assert.equal(assessment.shouldCompact, true);
+  assert.equal(inflated.outputReserveTokens, 64_000);
+  assert.equal(inflated.thresholdTokens, 903_232);
+  assert.equal(inflated.shouldCompact, false);
+
+  const modest = assessContextHeadroom({
+    contextTokens: 950_000,
+    contextWindow: 1_000_000,
+    modelMaxOutputTokens: 48_000,
+    observedMaxOutputTokens: 56_000,
+  });
+  assert.equal(modest.outputReserveTokens, 56_000, "real output above baseline still widens the reserve");
+  assert.equal(modest.thresholdTokens, 911_232);
+  assert.equal(modest.shouldCompact, true);
+});
+
+test("compactRatio 把压缩阈值提前到窗口比例，长会话更早回收上下文", () => {
+  const withoutRatio = assessContextHeadroom({
+    contextTokens: 700_000,
+    contextWindow: 1_000_000,
+    modelMaxOutputTokens: 48_000,
+  });
+  assert.equal(withoutRatio.thresholdTokens, 919_232);
+  assert.equal(withoutRatio.shouldCompact, false);
+
+  const withRatio = assessContextHeadroom({
+    contextTokens: 700_000,
+    contextWindow: 1_000_000,
+    modelMaxOutputTokens: 48_000,
+    compactRatio: 0.66,
+  });
+  assert.equal(withRatio.thresholdTokens, 660_000);
+  assert.equal(withRatio.shouldCompact, true);
+});
+
+test("非法 compactRatio 被忽略，回退 reserve 语义", () => {
+  for (const compactRatio of [0, 1, -0.5, 1.5, Number.NaN]) {
+    const assessment = assessContextHeadroom({
+      contextTokens: 700_000,
+      contextWindow: 1_000_000,
+      modelMaxOutputTokens: 48_000,
+      compactRatio,
+    });
+    assert.equal(assessment.thresholdTokens, 919_232);
+  }
 });
 
 test("大的当前输入会扩大 ingress reserve", () => {
@@ -670,4 +712,42 @@ test("未知 fieldless adapter 越线时也保留 payload 并显式告警", asyn
   assert.equal(errors.filter(line => (
     line.includes("custom-api") && line.includes("fieldless output budget")
   )).length, 1);
+});
+
+test("requested max_tokens 不再撑大 reserve；真实 message_end output 才进观测", async () => {
+  const previous = process.env.PI_CONTEXT_COMPACT_RATIO;
+  process.env.PI_CONTEXT_COMPACT_RATIO = "0.95"; // 关闭比例提前，纯 reserve 语义
+  try {
+    const harness = await registerExtension();
+    const compactCalls: any[] = [];
+    const ctx = runtimeContext(900_000, {
+      compact: (options: any) => compactCalls.push(options),
+    });
+
+    // 旧行为会把 requested 384K 记进观测 → reserve 250K → threshold ~753K → 900K 触发压缩。
+    await fire(harness, "before_provider_request", {
+      payload: { messages: [], max_tokens: 384_000 },
+    }, ctx);
+    await fire(harness, "agent_settled", {}, ctx);
+    assert.equal(compactCalls.length, 0, "requested max_tokens must not inflate the completion reserve");
+
+    // 真实完成输出 100K（core 64K 上限内）扩大 reserve → 在 960K 触发压缩。
+    let tokens = 960_000;
+    const growing = runtimeContext(0, {
+      getContextUsage: () => ({ tokens, contextWindow: WINDOW, percent: tokens / WINDOW * 100 }),
+      compact: (options: any) => compactCalls.push(options),
+    });
+    await fire(harness, "message_end", {
+      type: "message_end",
+      message: { role: "assistant", content: [], usage: { output: 100_000 } },
+    }, growing);
+    const settled = fire(harness, "agent_settled", {}, growing);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(compactCalls.length, 1, "real output above baseline widens the reserve and compacts");
+    compactCalls[0].onComplete({ estimatedTokensAfter: 20_000 });
+    await settled;
+  } finally {
+    if (previous === undefined) delete process.env.PI_CONTEXT_COMPACT_RATIO;
+    else process.env.PI_CONTEXT_COMPACT_RATIO = previous;
+  }
 });

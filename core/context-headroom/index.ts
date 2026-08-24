@@ -1,6 +1,8 @@
 export const MAX_COMPLETION_RESERVE_TOKENS = 48_000;
 export const MAX_INGRESS_RESERVE_TOKENS = 32_768;
 export const PROVIDER_ESTIMATE_SAFETY_TOKENS = 16_384;
+export const MAX_OBSERVED_OUTPUT_RESERVE_TOKENS = 64_000;
+export const DEFAULT_COMPACT_RATIO = 0.66;
 
 export interface ContextHeadroomInput {
   contextTokens: number | null | undefined;
@@ -8,6 +10,8 @@ export interface ContextHeadroomInput {
   modelMaxOutputTokens?: number | null;
   observedMaxOutputTokens?: number | null;
   pendingInputTokens?: number;
+  /** Optional earlier-compaction ratio: threshold = min(reserve-based, window * ratio). */
+  compactRatio?: number;
 }
 
 export interface ContextHeadroomAssessment {
@@ -33,12 +37,18 @@ function positiveInteger(value: unknown): number | null {
 export function assessContextHeadroom(input: ContextHeadroomInput): ContextHeadroomAssessment {
   const contextWindow = Math.max(0, Math.floor(input.contextWindow));
   const contextTokens = positiveInteger(input.contextTokens) ?? (input.contextTokens === 0 ? 0 : null);
+  // ADR-0024: observed output is real completion size, not the provider's
+  // requested max_tokens default; cap it so a 384K default cannot inflate the
+  // completion reserve to a quarter of the window.
   const observedOutput = positiveInteger(input.observedMaxOutputTokens);
+  const cappedObservedOutput = observedOutput === null
+    ? null
+    : Math.min(observedOutput, MAX_OBSERVED_OUTPUT_RESERVE_TOKENS);
   const modelBaseline = Math.min(
     positiveInteger(input.modelMaxOutputTokens) ?? MAX_COMPLETION_RESERVE_TOKENS,
     MAX_COMPLETION_RESERVE_TOKENS,
   );
-  const configuredOutput = Math.max(modelBaseline, observedOutput ?? 0);
+  const configuredOutput = Math.max(modelBaseline, cappedObservedOutput ?? 0);
   const outputReserveTokens = Math.min(
     configuredOutput,
     Math.max(1, Math.floor(contextWindow * 0.25)),
@@ -55,7 +65,16 @@ export function assessContextHeadroom(input: ContextHeadroomInput): ContextHeadr
     Math.max(0, contextWindow - 1),
     outputReserveTokens + ingressReserveTokens,
   );
-  const thresholdTokens = Math.max(0, contextWindow - requiredHeadroomTokens);
+  const reserveThreshold = Math.max(0, contextWindow - requiredHeadroomTokens);
+  const ratio = typeof input.compactRatio === "number"
+    && Number.isFinite(input.compactRatio)
+    && input.compactRatio > 0
+    && input.compactRatio < 1
+    ? input.compactRatio
+    : undefined;
+  const thresholdTokens = ratio === undefined
+    ? reserveThreshold
+    : Math.min(reserveThreshold, Math.floor(contextWindow * ratio));
 
   return {
     contextTokens,

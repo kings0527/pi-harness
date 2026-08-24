@@ -13,6 +13,7 @@ let entries: Array<{ type: string; data: any }>;
 let notifications: Array<{ sessionId: string; message: string; level: string }>;
 let contextEntries: Map<string, any[]>;
 let sentUserMessages: Array<{ content: string; options: any }>;
+let sentSteers: Array<{ message: any; options: any }>;
 let goal: typeof import("../core/goal/index.ts");
 let board: typeof import("../core/board/index.ts");
 
@@ -80,6 +81,7 @@ before(async () => {
   notifications = [];
   contextEntries = new Map();
   sentUserMessages = [];
+  sentSteers = [];
 
   const fakePi = {
     on(name: string, handler: (event: any, ctx: any) => any) {
@@ -97,6 +99,9 @@ before(async () => {
     sendUserMessage(content: string, options?: any) {
       sentUserMessages.push({ content, options });
     },
+    sendMessage(message: any, options?: any) {
+      sentSteers.push({ message, options });
+    },
   };
 
   const goalExtension = (await import(`../extensions/goal.ts?test=${Date.now()}`)).default;
@@ -111,6 +116,7 @@ beforeEach(() => {
   entries.length = 0;
   notifications.length = 0;
   sentUserMessages.length = 0;
+  sentSteers.length = 0;
 });
 
 after(() => {
@@ -304,4 +310,96 @@ test("goal status uses operator UI and does not inject persistent status message
   assert.ok(notifications.some(item => item.message.includes("Goal resumed")));
   assert.equal(sentUserMessages.length, 1, "only /goal <objective> starts an agent turn");
   assert.equal((handlers.context ?? []).length, 1, "context hook is legacy-status cleanup only");
+});
+
+test("active goal queues an auto-continuation steer when a reporting turn ends", async () => {
+  const sessionId = "extension-auto-continue";
+  const ctx = runtimeContext(sessionId);
+  await goalCommand.handler("keep working until done", ctx);
+  const state = goal.getGoal(sessionId)!;
+
+  await fire("agent_end", {
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [], stopReason: "stop" }],
+  }, ctx);
+
+  assert.equal(sentSteers.length, 1);
+  assert.equal(sentSteers[0].options.deliverAs, "steer");
+  assert.equal(sentSteers[0].message.customType, "pi-harness-goal-continue");
+  assert.equal(sentSteers[0].message.details.autoContinue, 1);
+  assert.equal(sentSteers[0].message.details.limit, 4);
+  assert.match(sentSteers[0].message.content, /keep working until done/);
+  assert.match(sentSteers[0].message.content, /automatic continuation/);
+  assert.match(sentSteers[0].message.content, new RegExp(goal.goalEvidenceTag(state.id)));
+});
+
+test("auto-continuation respects the per-user-turn cap and resets on the next real turn", async () => {
+  const sessionId = "extension-auto-continue-cap";
+  const ctx = runtimeContext(sessionId);
+  await goalCommand.handler("bounded objective", ctx);
+  const endEvent = {
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [], stopReason: "stop" }],
+  };
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await fire("agent_end", endEvent, ctx);
+  }
+  assert.equal(sentSteers.length, 4, "cap of 4 must bound the loop");
+
+  // A real user turn resets the budget; continuation flows again.
+  await startTurn(sessionId, "next user turn");
+  await fire("agent_end", endEvent, ctx);
+  assert.equal(sentSteers.length, 5);
+  assert.equal(sentSteers.at(-1)!.message.details.autoContinue, 1);
+});
+
+test("auto-continuation never fires for absent, paused, or achieved goals or aborted turns", async () => {
+  const sessionId = "extension-auto-continue-gates";
+  const ctx = runtimeContext(sessionId);
+  const endEvent = (stopReason: string) => ({
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [], stopReason }],
+  });
+
+  // No goal at all.
+  await fire("agent_end", endEvent("stop"), ctx);
+  assert.equal(sentSteers.length, 0);
+
+  // Paused goal.
+  await goalCommand.handler("pause-me", ctx);
+  await goalCommand.handler("pause", ctx);
+  await fire("agent_end", endEvent("stop"), ctx);
+  assert.equal(sentSteers.length, 0);
+
+  // Aborted/error turns never continue.
+  await goalCommand.handler("resume-me", ctx);
+  await goalCommand.handler("resume", ctx);
+  await fire("agent_end", endEvent("aborted"), ctx);
+  await fire("agent_end", endEvent("error"), ctx);
+  assert.equal(sentSteers.length, 0);
+
+  // Achieved goal stops continuation.
+  await fire("agent_end", endEvent("stop"), ctx);
+  assert.equal(sentSteers.length, 1, "active goal continues once");
+  const state = goal.getGoal(sessionId)!;
+  board.openTopic("extension-auto-continue-achieved", "achieve");
+  const input = {
+    action: "post",
+    topic: "extension-auto-continue-achieved",
+    content: "done",
+    tags: [goal.GOAL_MET_TAG, goal.goalEvidenceTag(state.id)],
+  };
+  const result = await boardTool.execute("done", input, undefined, undefined, ctx);
+  await fire("tool_result", {
+    toolName: "board",
+    toolCallId: "done",
+    input,
+    content: result.content,
+    details: result.details,
+    isError: result.isError ?? false,
+  }, ctx);
+  assert.equal(goal.getGoal(sessionId)?.status, "achieved");
+  await fire("agent_end", endEvent("stop"), ctx);
+  assert.equal(sentSteers.length, 1, "achieved goal must not auto-continue");
 });

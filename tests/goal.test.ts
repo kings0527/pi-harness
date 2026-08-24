@@ -129,3 +129,35 @@ test("goal core remains runtime-agnostic", () => {
   const source = readFileSync(sourcePath, "utf-8");
   assert.ok(!source.includes("@earendil"), "core/goal must not import pi packages");
 });
+
+test("auto-continuation policy gates on status, stop reason, and per-turn cap", () => {
+  const active = goal.setGoal("session-auto-policy", "continue policy");
+  assert.equal(goal.shouldAutoContinueGoal(active, "stop", 0), true);
+  assert.equal(goal.shouldAutoContinueGoal(active, undefined, 0), true);
+  assert.equal(goal.shouldAutoContinueGoal(active, "toolUse", 3), true);
+
+  assert.equal(goal.shouldAutoContinueGoal(active, "error", 0), false);
+  assert.equal(goal.shouldAutoContinueGoal(active, "aborted", 0), false);
+  assert.equal(goal.shouldAutoContinueGoal(active, "stop", 4), false, "cap is exclusive");
+  assert.equal(goal.shouldAutoContinueGoal(active, "stop", 5), false);
+  assert.equal(goal.shouldAutoContinueGoal(null, "stop", 0), false);
+
+  const paused = goal.pauseGoal("session-auto-policy");
+  assert.equal(goal.shouldAutoContinueGoal(paused, "stop", 0), false);
+  const resumed = goal.resumeGoal("session-auto-policy");
+  assert.equal(goal.shouldAutoContinueGoal(resumed, "stop", 0), true);
+});
+
+test("goal continue message re-asserts objective, tags, and blocker policy", () => {
+  const state = goal.setGoal("session-auto-message", "finish the offline pipeline");
+  const rendered = goal.renderGoalContinueMessage(state, 2, 4);
+
+  assert.match(rendered, /<goal_continue/);
+  assert.match(rendered, /attempt="2"/);
+  assert.match(rendered, /limit="4"/);
+  assert.match(rendered, /finish the offline pipeline/);
+  assert.match(rendered, /automatic continuation/);
+  assert.match(rendered, /goal-met/);
+  assert.match(rendered, new RegExp(goal.goalEvidenceTag(state.id)));
+  assert.match(rendered, /blocked by missing information/);
+});

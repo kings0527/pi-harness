@@ -1,12 +1,23 @@
 import {
   assessContextHeadroom,
   clampProviderOutputBudget,
+  DEFAULT_COMPACT_RATIO,
 } from "../core/context-headroom/index.ts";
 import { estimateContextTokens } from "../core/context-size/index.ts";
 import { appendEvent } from "../core/events/index.ts";
 import { REASONING_CHECKPOINT_INSTRUCTIONS } from "../core/reasoning-epoch/index.ts";
 
 const ESTIMATED_IMAGE_TOKENS = 1_600;
+
+function parseCompactRatio(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 && value < 1 ? value : undefined;
+}
+
+// ADR-0024: compact earlier than the reserve-based threshold so long sessions
+// stay inside the model's reliable attention range.
+const COMPACT_RATIO = parseCompactRatio(process.env.PI_CONTEXT_COMPACT_RATIO) ?? DEFAULT_COMPACT_RATIO;
 
 interface QueuedInput {
   deliver: () => void;
@@ -62,6 +73,7 @@ function currentAssessment(
     modelMaxOutputTokens: ctx?.model?.maxTokens,
     observedMaxOutputTokens: observedOutputByModel.get(outputObservationKey(ctx)),
     pendingInputTokens,
+    compactRatio: COMPACT_RATIO,
   });
 }
 
@@ -334,13 +346,9 @@ export default async function (pi: any) {
       contextTokens: usage?.tokens,
       contextWindow: Number(ctx?.model?.contextWindow ?? usage?.contextWindow ?? 0),
     });
-    if (typeof result.requestedTokens === "number") {
-      const key = outputObservationKey(ctx);
-      observedOutputByModel.set(
-        key,
-        Math.max(observedOutputByModel.get(key) ?? 0, result.requestedTokens),
-      );
-    }
+    // ADR-0024: the completion reserve is fed by ACTUAL assistant output
+    // (message_end usage.output), never by the requested max_tokens default
+    // the provider advertises — a 384K default must not inflate the reserve.
     if (typeof result.requestedTokens !== "number") {
       const warningKey = `${sessionId(ctx)}:${modelKey(ctx)}:${ctx?.model?.api ?? "unknown-api"}`;
       const assessment = currentAssessment(ctx);
@@ -379,5 +387,16 @@ export default async function (pi: any) {
       message,
     });
     return result.payload;
+  });
+
+  // ADR-0024: record the model's ACTUAL completion size as the observed
+  // output that shapes the completion reserve.
+  pi.on("message_end", async (event: any, ctx: any) => {
+    const message = event?.message;
+    if (!message || message.role !== "assistant") return;
+    const output = message?.usage?.output;
+    if (typeof output !== "number" || !Number.isFinite(output) || output <= 0) return;
+    const key = outputObservationKey(ctx);
+    observedOutputByModel.set(key, Math.max(observedOutputByModel.get(key) ?? 0, Math.floor(output)));
   });
 }
