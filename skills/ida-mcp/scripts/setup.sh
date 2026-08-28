@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# setup.sh — install / verify / run the IDA Pro MCP automation environment.
+# setup.sh — one-time environment setup for the IDA Pro MCP automation stack.
+#
+# For AGENTS: you normally DON'T need this. `ida.py` auto-starts a headless IDA
+# daemon on demand. Use this only for one-time install / diagnostics.
 #
 # Subcommands:
-#   setup.sh install          Install the IDA GUI plugin (user-level ~/.idapro/plugins)
-#   setup.sh install-idalib    Install the idapro python module for headless mode
-#   setup.sh env               Print export lines for IDADIR (add to your shell rc)
-#   setup.sh health            Full environment + live-server check
-#   setup.sh serve <binary>    Run the headless idalib MCP server on 127.0.0.1:8745
-#   setup.sh uninstall         Remove the GUI plugin
-#
-# The GUI plugin path is preferred for interactive analysis (open a binary in
-# IDA, Edit > Plugins > MCP, server listens on 127.0.0.1:13337). The headless
-# path is for fully automated / CI use.
+#   setup.sh health            Full environment + live-server check (start here)
+#   setup.sh install-idalib    One-time: pip-install & activate the idapro python module
+#                              (required for headless auto-start)
+#   setup.sh env               Print the IDADIR export (auto-detection usually makes this unneeded)
+#   setup.sh install-plugin    Optional: install the GUI plugin (~/.idapro/plugins) for
+#                              interactive use inside the IDA app (serves :13337)
+#   setup.sh serve <binary>    Manual headless server on :8745 (ida.py does this for you)
+#   setup.sh uninstall-plugin  Remove the GUI plugin
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,11 +43,12 @@ find_mcp_cli() {
 cmd="${1:-health}"; shift || true
 
 case "$cmd" in
-  install)
+  install-plugin)
     cli="$(find_mcp_cli)" || { echo "ERROR: ida-pro-mcp not installed. Run: pip install ida-pro-mcp"; exit 1; }
     echo ">> Installing IDA GUI plugin via: $cli"
     $cli --install ida-plugin
-    echo ">> Done. Restart IDA, then Edit > Plugins > MCP (Ctrl-Alt-M) to start server on :13337"
+    echo ">> Done. Restart IDA, then Edit > Plugins > MCP (Ctrl-Alt-M) to serve on :13337 (interactive use)."
+    echo ">> NOTE: agents don't need this — ida.py auto-starts a headless daemon."
     ;;
 
   install-idalib)
@@ -74,8 +76,13 @@ case "$cmd" in
     echo "IDA install : ${idadir:-NOT FOUND (set IDADIR)}"
     cli="$(find_mcp_cli || true)"
     echo "MCP CLI     : ${cli:-NOT installed (pip install ida-pro-mcp)}"
+    if python3 -c "import idapro" 2>/dev/null || IDADIR="${idadir:-}" python3 -c "import idapro" 2>/dev/null; then
+      echo "idapro mod  : importable (headless auto-start ready)"
+    else
+      echo "idapro mod  : NOT importable (run: setup.sh install-idalib)"
+    fi
     loader="$HOME/.idapro/plugins/ida_mcp.py"
-    if [[ -e "$loader" ]]; then echo "GUI plugin  : installed ($loader)"; else echo "GUI plugin  : NOT installed (run: setup.sh install)"; fi
+    if [[ -e "$loader" ]]; then echo "GUI plugin  : installed ($loader)"; else echo "GUI plugin  : not installed (optional; agents don't need it)"; fi
     python3 "$SCRIPT_DIR/ida.py" --health || true
     ;;
 
@@ -86,7 +93,8 @@ case "$cmd" in
     if ! python3 -c "import idapro" 2>/dev/null; then
       echo "ERROR: 'idapro' python module not importable. Run: setup.sh install-idalib"; exit 1
     fi
-    echo ">> Serving headless idalib MCP on 127.0.0.1:8745 (IDADIR=$idadir)"
+    echo ">> Manual headless idalib MCP on 127.0.0.1:8745 (IDADIR=$idadir)"
+    echo ">> (agents normally let ida.py manage this automatically)"
     if [[ -n "$bin" ]]; then
       echo ">> Loading binary: $bin"
       exec idalib-mcp --host 127.0.0.1 --port 8745 "$bin"
@@ -95,12 +103,12 @@ case "$cmd" in
     fi
     ;;
 
-  uninstall)
+  uninstall-plugin)
     cli="$(find_mcp_cli)" || { echo "ERROR: ida-pro-mcp not installed."; exit 1; }
     $cli --uninstall ida-plugin
     ;;
 
   *)
-    echo "usage: setup.sh {install|install-idalib|env|health|serve <binary>|uninstall}"; exit 2
+    echo "usage: setup.sh {health|install-idalib|env|install-plugin|serve <binary>|uninstall-plugin}"; exit 2
     ;;
 esac
