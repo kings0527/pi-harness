@@ -122,7 +122,7 @@ test("默认 scope=project 写项目根并精确更新 index", () => {
   assert.match(written, /A project-level conclusion\./);
   assert.match(written, /来源: topic-test#seq-3/);
   assert.equal(existsSync(join(globalRoot, entryPath)), false);
-  assert.deepEqual(knowledge.getIndex(), [{ path: entryPath, description: "test entry A" }]);
+  assert.deepEqual(knowledge.getIndex(), [{ path: entryPath, description: "test entry A", status: "active" }]);
 
   assert.throws(
     () => knowledge.addEntry(entryPath, "other", "topic-test#seq-9", "duplicate"),

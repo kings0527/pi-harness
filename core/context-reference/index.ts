@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   generateReferenceDigest,
@@ -9,9 +8,11 @@ import { hasArchivedTopic, listOpenTopics, readArchivedTopic } from "../board/in
 import type { Note, Topic } from "../board/types.ts";
 import {
   auditIndex,
+  getIndex,
   getKnowledgeRoot,
   getProjectRoot,
   getWorkspaceRoot,
+  type IndexEntry,
   type KnowledgeIndexIssue,
   type KnowledgeScope,
 } from "../knowledge/index.ts";
@@ -89,9 +90,29 @@ function escapeXml(value: string): string {
     .replaceAll("'", "&apos;");
 }
 
-function readIndexFile(indexPath: string): string {
-  if (!existsSync(indexPath)) return "";
-  return readFileSync(indexPath, "utf-8").trim();
+// ADR-0026: the model's primary catalog carries only active rows. Retired
+// rows fold into a demoted section (still cite-able for history, never a peer
+// of live knowledge); dead links drop from view entirely and surface only as a
+// health warning so a real file can be restored or the row repaired.
+function renderIndexCatalog(entries: readonly IndexEntry[], deadPaths: ReadonlySet<string>): string {
+  const active: string[] = [];
+  const retired: string[] = [];
+  for (const entry of entries) {
+    if (deadPaths.has(entry.path)) continue;
+    if (entry.status === "active") {
+      active.push(`${entry.path} | ${entry.description}`);
+    } else {
+      retired.push(`[${entry.status.toUpperCase()}] ${entry.path} | ${entry.description}`);
+    }
+  }
+  const parts: string[] = [];
+  if (active.length > 0) parts.push(active.join("\n"));
+  if (retired.length > 0) {
+    parts.push(
+      `retired (folded — superseded/archived/deprecated; consult only when a task explicitly needs the history, never as current knowledge):\n${retired.join("\n")}`,
+    );
+  }
+  return parts.join("\n\n");
 }
 
 function appendRootKnowledge(
@@ -153,10 +174,14 @@ export function buildKnowledgeSnapshot(activeScopes?: string[]): KnowledgeSnapsh
   for (const { root, scopes } of indexRoots) {
     const scope = scopes[0];
     try {
-      for (const issue of auditIndex(scope)) issues.push({ scope, issue });
-      const index = readIndexFile(join(root, "index.md"));
-      if (index) {
-        sections.push(`knowledge(${scopes.join("+")}:${join(root, "index.md")}):\n${index}`);
+      const scopeIssues = auditIndex(scope);
+      for (const issue of scopeIssues) issues.push({ scope, issue });
+      // Dead links (missing/invalid) are reported above but excluded from the
+      // catalog: injecting a row whose file is gone is pure misdirection.
+      const deadPaths = new Set(scopeIssues.map(issue => issue.path));
+      const body = renderIndexCatalog(getIndex(scope), deadPaths);
+      if (body) {
+        sections.push(`knowledge(${scopes.join("+")}:${join(root, "index.md")}):\n${body}`);
       }
     } catch (error: any) {
       issues.push({

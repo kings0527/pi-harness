@@ -72,6 +72,8 @@ The `distill` action automatically updates `index.md` in the chosen root. Verify
 
 5. **Preserve original wording**: Don't over-summarize. The entry should be detailed enough to be useful without re-reading the original topic.
 
+6. **Retiring, not deleting (ADR-0026)**: When an entry is superseded, mark its index row with a leading tag — `[SUPERSEDED]`, `[ARCHIVED]`, or `[DEPRECATED]` — e.g. `[SUPERSEDED] qnr/foo/bar.md | ...`. Retired rows fold out of the injected catalog into a demoted "retired" section (still cite-able as history) instead of sitting beside current knowledge. Never delete the row or the file; re-distilling the same path reactivates it (drops the tag). Dead links (missing files) are auto-excluded from injection and reported as health issues — repair the path or remove the row deliberately.
+
 ## Example
 
 Topic `ghidra-crash-investigation` closed with findings:

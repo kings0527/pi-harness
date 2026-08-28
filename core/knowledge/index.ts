@@ -11,9 +11,25 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { appendEvent } from "../events/index.ts";
 
+// Lifecycle of an index row. `active` is the implicit default so every legacy
+// row (no tag) keeps its current meaning. Retired rows stay in the file for
+// traceability but fold out of the model's primary catalog (ADR-0026).
+export type IndexEntryStatus = "active" | "superseded" | "archived" | "deprecated";
+
+const RETIRED_STATUS_BY_TAG: Record<string, IndexEntryStatus> = {
+  SUPERSEDED: "superseded",
+  ARCHIVED: "archived",
+  DEPRECATED: "deprecated",
+};
+
+// A leading, case-insensitive `[TAG]` marks a row's lifecycle. It is stripped
+// before the path is parsed so a retired row never resolves as a dead link.
+const STATUS_TAG_PATTERN = /^\[(SUPERSEDED|ARCHIVED|DEPRECATED)\]\s*/i;
+
 export interface IndexEntry {
   path: string;
   description: string;
+  status: IndexEntryStatus;
 }
 
 export interface KnowledgeIndexIssue {
@@ -146,12 +162,16 @@ export function getIndex(scope: KnowledgeScope = "project"): IndexEntry[] {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("<!--")) continue;
 
-    const pipeIndex = trimmed.indexOf("|");
+    const tag = STATUS_TAG_PATTERN.exec(trimmed);
+    const status = tag ? RETIRED_STATUS_BY_TAG[tag[1].toUpperCase()] : "active";
+    const row = tag ? trimmed.slice(tag[0].length) : trimmed;
+
+    const pipeIndex = row.indexOf("|");
     if (pipeIndex === -1) continue;
 
-    const path = trimmed.slice(0, pipeIndex).trim();
-    const description = trimmed.slice(pipeIndex + 1).trim();
-    if (path && description) entries.push({ path, description });
+    const path = row.slice(0, pipeIndex).trim();
+    const description = row.slice(pipeIndex + 1).trim();
+    if (path && description) entries.push({ path, description, status });
   }
 
   return entries;
@@ -263,9 +283,13 @@ function updateIndex(entryPath: string, description: string, scope: KnowledgeSco
   const updated = lines.map(line => {
     const pipeIndex = line.indexOf("|");
     if (pipeIndex === -1) return line;
-    const indexedPath = line.slice(0, pipeIndex).trim();
+    const rawPath = line.slice(0, pipeIndex).trim();
+    const tag = STATUS_TAG_PATTERN.exec(rawPath);
+    const indexedPath = tag ? rawPath.slice(tag[0].length).trim() : rawPath;
     if (indexedPath !== entryPath) return line;
     found = true;
+    // Re-distilling a path with fresh evidence reactivates it: drop any prior
+    // retirement tag so the row rejoins the primary catalog.
     return `${entryPath} | ${description}`;
   });
 
