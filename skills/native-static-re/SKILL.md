@@ -10,6 +10,7 @@ description: >-
 
 ## 0. RELATED ROUTING
 
+- [ida-mcp](../ida-mcp/SKILL.md) — **concrete IDA interface on this machine** (install/serve, `ida.py` wrapper, verified live tool set + exact args). This skill is the *methodology*; ida-mcp is *how to actually call IDA here*.
 - [re-router](../re-router/SKILL.md) — re-assess if static analysis is the right approach
 - [re-escalation](../re-escalation/SKILL.md) — when static analysis is blocked by heavy obfuscation
 - [emulation-re](../emulation-re/SKILL.md) — when code is too obfuscated to read statically, trace dynamically
@@ -18,6 +19,8 @@ description: >-
 - [symbolic-execution-tools](../symbolic-execution-tools/SKILL.md) — automated constraint solving
 
 ## 1. IDA MCP WORKFLOW — Primary Analysis Path
+
+> For the exact, verified tool set + argument schemas + how to start/reach the server on **this** machine, load [ida-mcp](../ida-mcp/SKILL.md). The table below is a conceptual overview; tool names/args in ida-pro-mcp v2 are canonical there (e.g. `disasm`, `find`/`find_regex`/`find_bytes`, `set_comments`, `py_eval`).
 
 The IDA MCP server provides these tools (use them via MCP calls):
 
