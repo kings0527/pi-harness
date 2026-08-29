@@ -31,13 +31,48 @@ const RUNTIME_REFERENCE_TYPES = new Set([
   CRITICAL_MESSAGE_TYPE,
 ]);
 
-const activeKnowledgeScopes = new Set<string>();
-const participatingTopics = new Set<string>();
-let pendingDeliveryByTurn = new WeakMap<object, { board?: any; critical?: any }>();
-let participationReady = false;
-let lastSizeWarningKey: string | null = null;
-let lastHealthWarningKey: string | null = null;
-let lastBoardWarningKey: string | null = null;
+interface SessionFeedState {
+  activeKnowledgeScopes: Set<string>;
+  participatingTopics: Set<string>;
+  participationReady: boolean;
+  lastSizeWarningKey: string | null;
+  lastHealthWarningKey: string | null;
+  lastBoardWarningKey: string | null;
+}
+
+const sessionStates = new Map<string, SessionFeedState>();
+const pendingDeliveryByTurn = new WeakMap<object, { board?: any; critical?: any }>();
+
+function sessionId(ctx: any): string {
+  try {
+    const id = ctx?.sessionManager?.getSessionId?.();
+    if (typeof id === "string" && id.length > 0) return id;
+  } catch {
+    // Fall through to the stable legacy bucket for runtimes without a manager.
+  }
+  return "unknown-session";
+}
+
+function emptySessionState(): SessionFeedState {
+  return {
+    activeKnowledgeScopes: new Set(),
+    participatingTopics: new Set(),
+    participationReady: false,
+    lastSizeWarningKey: null,
+    lastHealthWarningKey: null,
+    lastBoardWarningKey: null,
+  };
+}
+
+function stateFor(ctx: any): SessionFeedState {
+  const id = sessionId(ctx);
+  let state = sessionStates.get(id);
+  if (!state) {
+    state = emptySessionState();
+    sessionStates.set(id, state);
+  }
+  return state;
+}
 
 const SCOPE_ACTIVATING_TOOLS = new Set(["read", "read_file", "edit", "write", "edit_file", "write_file"]);
 const SCOPE_IGNORE_BASENAMES = new Set(["package.json", "package-lock.json", "tsconfig.json", ".gitignore", "README.md", "KNOWLEDGE.md", "LICENSE"]);
@@ -60,17 +95,17 @@ function contextWindowFrom(ctx: any): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
-function emitHealthWarning(issues: KnowledgeSnapshot["issues"]): void {
+function emitHealthWarning(state: SessionFeedState, issues: KnowledgeSnapshot["issues"]): void {
   if (issues.length === 0) {
-    lastHealthWarningKey = null;
+    state.lastHealthWarningKey = null;
     return;
   }
   const details = issues
     .map(({ scope, issue }) => `${scope}:${issue.path} (${issue.reason}${issue.detail ? `: ${issue.detail}` : ""})`)
     .join("; ");
   const key = sha256(details);
-  if (key === lastHealthWarningKey) return;
-  lastHealthWarningKey = key;
+  if (key === state.lastHealthWarningKey) return;
+  state.lastHealthWarningKey = key;
 
   const message = `Knowledge index health check found stale/invalid rows: ${details}. Review the selected index and remove or repair only confirmed obsolete entries; no automatic cleanup was performed.`;
   console.error(`[context-feed] WARN: ${message}`);
@@ -81,15 +116,15 @@ function emitHealthWarning(issues: KnowledgeSnapshot["issues"]): void {
   }
 }
 
-function emitBoardWarning(warnings: readonly string[]): void {
+function emitBoardWarning(state: SessionFeedState, warnings: readonly string[]): void {
   if (warnings.length === 0) {
-    lastBoardWarningKey = null;
+    state.lastBoardWarningKey = null;
     return;
   }
   const details = warnings.join("; ");
   const key = sha256(details);
-  if (key === lastBoardWarningKey) return;
-  lastBoardWarningKey = key;
+  if (key === state.lastBoardWarningKey) return;
+  state.lastBoardWarningKey = key;
   const message = `Board delivery notice: ${details}. Source files were preserved; any deferred read will retry on the next turn.`;
   console.error(`[context-feed] WARN: ${message}`);
   try {
@@ -100,6 +135,7 @@ function emitBoardWarning(warnings: readonly string[]): void {
 }
 
 function emitSizeWarning(
+  state: SessionFeedState,
   injectedContent: string,
   knowledgeBytes: number,
   boardBytes: number,
@@ -110,12 +146,12 @@ function emitSizeWarning(
   if (!contextWindow) return;
   const assessment = assessContextSize(injectedContent, contextWindow);
   if (!assessment.shouldWarn) {
-    lastSizeWarningKey = null;
+    state.lastSizeWarningKey = null;
     return;
   }
   const key = String(contextWindow);
-  if (key === lastSizeWarningKey) return;
-  lastSizeWarningKey = key;
+  if (key === state.lastSizeWarningKey) return;
+  state.lastSizeWarningKey = key;
 
   const percent = (assessment.ratio * 100).toFixed(1);
   const knowledgeTokens = Math.ceil(knowledgeBytes / 3);
@@ -244,8 +280,8 @@ function activeBoardDeliveryDetails(entries: any[], metadataEntries: any[]): unk
     });
 }
 
-function restoreParticipatingTopics(pi: any, ctx: any): boolean {
-  participatingTopics.clear();
+function restoreParticipatingTopics(pi: any, ctx: any, state: SessionFeedState): boolean {
+  state.participatingTopics.clear();
   const entries = activeEntries(ctx);
   const branch = ctx?.sessionManager?.getBranch?.();
   const history = Array.isArray(branch) ? branch : entries;
@@ -258,10 +294,10 @@ function restoreParticipatingTopics(pi: any, ctx: any): boolean {
     if (data.action === "initialize" && Array.isArray(data.topics)) {
       hasPersistedInitialization = true;
       for (const topic of data.topics) {
-        if (typeof topic === "string" && topic.length > 0) participatingTopics.add(topic);
+        if (typeof topic === "string" && topic.length > 0) state.participatingTopics.add(topic);
       }
     } else if (data.action === "join" && typeof data.topic === "string" && data.topic.length > 0) {
-      participatingTopics.add(data.topic);
+      state.participatingTopics.add(data.topic);
     }
   }
 
@@ -270,14 +306,14 @@ function restoreParticipatingTopics(pi: any, ctx: any): boolean {
   const historicalCoverage = deriveBoardCoverage(activeBoardDeliveryDetails(history, history));
   if (historicalCoverage.hasCheckpoint) {
     hasPersistedInitialization = true;
-    for (const topic of Object.keys(historicalCoverage.topicStates)) participatingTopics.add(topic);
+    for (const topic of Object.keys(historicalCoverage.topicStates)) state.participatingTopics.add(topic);
   }
   if (hasPersistedInitialization) return true;
 
   // Preserve the original join behavior for a genuinely new session: topics
   // already open when the session starts are the topics this agent joins.
   try {
-    for (const topic of listOpenTopics()) participatingTopics.add(topic.id);
+    for (const topic of listOpenTopics()) state.participatingTopics.add(topic.id);
   } catch {
     // Do not persist an empty visibility set when the source could not be
     // listed. The first turn retries instead of silently losing participation.
@@ -285,9 +321,35 @@ function restoreParticipatingTopics(pi: any, ctx: any): boolean {
   }
   pi.appendEntry?.(BOARD_PARTICIPATION_ENTRY_TYPE, {
     action: "initialize",
-    topics: [...participatingTopics].sort(),
+    topics: [...state.participatingTopics].sort(),
     joinedAt: Date.now(),
   });
+  return true;
+}
+
+/**
+ * Pull project-wide open-topic membership at every turn boundary. Separate Pi
+ * processes share the same `.pi-board`, but they do not share in-memory tool
+ * events, so startup-only membership would permanently miss a peer-created
+ * topic. Persist each discovered join in this session for resume/close replay.
+ */
+function discoverPeerTopics(pi: any, state: SessionFeedState): boolean {
+  let topics;
+  try {
+    topics = listOpenTopics();
+  } catch {
+    return false;
+  }
+  for (const topic of topics) {
+    if (state.participatingTopics.has(topic.id)) continue;
+    state.participatingTopics.add(topic.id);
+    pi.appendEntry?.(BOARD_PARTICIPATION_ENTRY_TYPE, {
+      action: "join",
+      topic: topic.id,
+      reason: "open-topic-discovery",
+      joinedAt: Date.now(),
+    });
+  }
   return true;
 }
 
@@ -398,23 +460,25 @@ function criticalMessage(
 
 export default async function (pi: any) {
   pi.on("session_start", async (_event: any, ctx: any) => {
-    activeKnowledgeScopes.clear();
-    pendingDeliveryByTurn = new WeakMap();
-    lastSizeWarningKey = null;
-    lastHealthWarningKey = null;
-    lastBoardWarningKey = null;
-    participationReady = restoreParticipatingTopics(pi, ctx);
+    const state = emptySessionState();
+    sessionStates.set(sessionId(ctx), state);
+    state.participationReady = restoreParticipatingTopics(pi, ctx, state);
   });
 
-  pi.on("tool_result", async (event: any) => {
+  pi.on("session_shutdown", async (_event: any, ctx: any) => {
+    sessionStates.delete(sessionId(ctx));
+  });
+
+  pi.on("tool_result", async (event: any, ctx: any) => {
     const toolName = event.tool || event.toolName;
     if (toolName !== "board" || event.isError === true) return;
     const input = event.input || event.args || {};
+    const state = stateFor(ctx);
     if ((input.action !== "open" && input.action !== "post")
       || typeof input.topic !== "string"
       || input.topic.length === 0
-      || participatingTopics.has(input.topic)) return;
-    participatingTopics.add(input.topic);
+      || state.participatingTopics.has(input.topic)) return;
+    state.participatingTopics.add(input.topic);
     pi.appendEntry?.(BOARD_PARTICIPATION_ENTRY_TYPE, {
       action: "join",
       topic: input.topic,
@@ -422,7 +486,7 @@ export default async function (pi: any) {
     });
   });
 
-  pi.on("tool_call", async (event: any) => {
+  pi.on("tool_call", async (event: any, ctx: any) => {
     const toolName = (event.tool || event.toolName || "").toLowerCase();
     if (!SCOPE_ACTIVATING_TOOLS.has(toolName)) return;
     const input = event.input || event.args || {};
@@ -432,7 +496,7 @@ export default async function (pi: any) {
     if (SCOPE_IGNORE_BASENAMES.has(basename)) return;
     if (filePath.includes("node_modules/") || filePath.includes(".git/")) return;
     const scopeDir = findKnowledgeScope(filePath, process.cwd());
-    if (scopeDir) activeKnowledgeScopes.add(scopeDir);
+    if (scopeDir) stateFor(ctx).activeKnowledgeScopes.add(scopeDir);
   });
 
   // First handler plans one user-turn delivery and emits the independent
@@ -443,16 +507,22 @@ export default async function (pi: any) {
     const entries = activeEntries(ctx);
     const branch = ctx?.sessionManager?.getBranch?.();
     const metadataEntries = Array.isArray(branch) ? branch : entries;
-    const knowledge = buildKnowledgeSnapshot([...activeKnowledgeScopes]);
+    const state = stateFor(ctx);
+    const knowledge = buildKnowledgeSnapshot([...state.activeKnowledgeScopes]);
     const knowledgeReference = buildKnowledgeReference(knowledge);
     const coverage = deriveBoardCoverage(activeBoardDeliveryDetails(entries, metadataEntries));
-    if (!participationReady) participationReady = restoreParticipatingTopics(pi, ctx);
-    const board = participationReady
-      ? buildBoardDelivery(participatingTopics, coverage)
-      : unavailableBoardDelivery("Board participation initialization failed; delivery deferred");
+    if (!state.participationReady) {
+      state.participationReady = restoreParticipatingTopics(pi, ctx, state);
+    }
+    if (state.participationReady && !discoverPeerTopics(pi, state)) {
+      state.participationReady = false;
+    }
+    const board = state.participationReady
+      ? buildBoardDelivery(state.participatingTopics, coverage)
+      : unavailableBoardDelivery("Board participation discovery failed; delivery deferred");
     const activeCritical = activeCriticalKeys(entries, board);
-    emitHealthWarning(knowledge.issues);
-    emitBoardWarning(board.warnings ?? []);
+    emitHealthWarning(state, knowledge.issues);
+    emitBoardWarning(state, board.warnings ?? []);
 
     const frozenKnowledge = freezeReference(
       pi,
@@ -536,6 +606,7 @@ export default async function (pi: any) {
         injectedBytes - knowledge.bytes - activeBoardBytes,
       );
       emitSizeWarning(
+        state,
         injectedContent,
         knowledge.bytes,
         activeBoardBytes,

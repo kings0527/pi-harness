@@ -104,12 +104,12 @@ after(() => {
   rmSync(sandbox, { recursive: true, force: true });
 });
 
-function runtimeContext(window: number): any {
+function runtimeContext(window: number, id = "context-feed-session", entries = contextEntries): any {
   return {
     sessionManager: {
-      getSessionId: () => "context-feed-session",
-      buildContextEntries: () => contextEntries,
-      getBranch: () => contextEntries,
+      getSessionId: () => id,
+      buildContextEntries: () => entries,
+      getBranch: () => entries,
     },
     model: { id: "test-model", contextWindow: window },
     getContextUsage: () => ({ tokens: 0, contextWindow: window, percent: 0 }),
@@ -631,41 +631,54 @@ test("branch 只保留 checkpoint 时，缺失的 CRITICAL 正文会重显", asy
   assert.match(critical.content, /CRITICAL-ONLY-UPDATE/);
 });
 
-test("失败的 Board open/post result 不会让 session 加入 topic", async () => {
+test("失败的 Board open/post result 不直接登记 join；下一轮仍由共享目录发现", async () => {
   const topic = "failed-board-join";
   board.openTopic(topic, "failed mutations are not participation evidence");
-  board.postNote(topic, "peer", "FAILED-JOIN-MUST-STAY-HIDDEN");
+  board.postNote(topic, "peer", "FAILED-RESULT-BUT-PEER-TOPIC-VISIBLE");
+  const entriesBeforeResult = sessionEntries.length;
   await fire("tool_result", {
     tool: "board",
     input: { action: "post", topic },
     isError: true,
   }, runtimeContext(1_000_000));
+  assert.equal(sessionEntries.length, entriesBeforeResult, "failed mutation must not directly persist participation");
 
   const results = await startTurn("failed Board mutation");
-  assert.equal(messageOf(results, "pi-harness-board-delta"), undefined);
+  const delta = messageOf(results, "pi-harness-board-delta");
+  assert.ok(delta);
+  assert.match(delta.content, /FAILED-RESULT-BUT-PEER-TOPIC-VISIBLE/);
+  assert.ok(sessionEntries.some(entry => (
+    entry.type === "pi-harness-board-participation"
+      && entry.data.action === "join"
+      && entry.data.topic === topic
+      && entry.data.reason === "open-topic-discovery"
+  )));
   board.closeTopic(topic);
 });
 
-test("未参与的 peer topic 不泄露，当前 agent 首次 post 后以完整 open delta 加入", async () => {
+test("peer 在 session 启动后新建 topic，当前 agent 无需 board read/post 即在下一轮收到", async () => {
   board.openTopic("cross-agent-topic", "Cross-agent synchronization");
   board.postNote("cross-agent-topic", "other-agent", "CROSS-AGENT-FIRST-NOTE");
 
-  const unseen = await startTurn("unjoined peer topic remains isolated");
-  assert.equal(messageOf(unseen, "pi-harness-board-delta"), undefined);
-
-  board.postNote("cross-agent-topic", "current-agent", "CURRENT-AGENT-JOIN-NOTE");
-  await joinTopic("cross-agent-topic");
-  const joined = await startTurn("observe joined peer topic");
-  const delta = messageOf(joined, "pi-harness-board-delta");
-  assert.ok(delta);
-  assert.match(delta.content, /cross-agent-topic/);
-  assert.match(delta.content, /CROSS-AGENT-FIRST-NOTE/);
-  assert.match(delta.content, /CURRENT-AGENT-JOIN-NOTE/);
+  const discovered = await startTurn("discover peer-created topic");
+  const opened = messageOf(discovered, "pi-harness-board-delta");
+  assert.ok(opened);
+  assert.match(opened.content, /topic_opened/);
+  assert.match(opened.content, /cross-agent-topic/);
+  assert.match(opened.content, /CROSS-AGENT-FIRST-NOTE/);
   assert.ok(sessionEntries.some(entry => (
     entry.type === "pi-harness-board-participation"
       && entry.data.action === "join"
       && entry.data.topic === "cross-agent-topic"
+      && entry.data.reason === "open-topic-discovery"
   )));
+
+  board.postNote("cross-agent-topic", "other-agent", "CROSS-AGENT-SECOND-NOTE");
+  const updated = await startTurn("observe peer update");
+  const delta = messageOf(updated, "pi-harness-board-delta");
+  assert.ok(delta);
+  assert.match(delta.content, /CROSS-AGENT-SECOND-NOTE/);
+  assert.doesNotMatch(delta.content, /CROSS-AGENT-FIRST-NOTE/);
 });
 
 test("已覆盖 topic 关闭后只追加 tombstone", async () => {
@@ -732,6 +745,50 @@ test("peer 在两轮间 post 后 close 时先补齐 archive final delta/CRITICAL
   assert.ok(afterFullBoardCompaction.criticalUpdates.some(
     update => update.topic === topic && update.note.content === "CLOSE-FINAL-CRITICAL",
   ));
+});
+
+test("同进程另一 session 启动不会清掉当前 session 的已参与 topic", async () => {
+  const topic = "session-isolated-board-state";
+  const entriesA: any[] = [];
+  const entriesB: any[] = [];
+  const ctxA = runtimeContext(1_000_000, "board-session-a", entriesA);
+  const ctxB = runtimeContext(1_000_000, "board-session-b", entriesB);
+  const persist = (entries: any[], results: any[]) => {
+    for (const result of results) {
+      if (!result?.message) continue;
+      entries.push({ type: "custom_message", ...result.message, timestamp: new Date().toISOString() });
+    }
+  };
+
+  await fire("session_start", {}, ctxA);
+  board.openTopic(topic, "prove session-local Board feed state");
+  board.postNote(topic, "peer", "SESSION-A-OPEN-NOTE");
+  persist(entriesA, await fire(
+    "before_agent_start",
+    { prompt: "A observes open topic", systemPrompt: "system" },
+    ctxA,
+  ));
+  const opened = entriesA.find(entry => (
+    entry.customType === "pi-harness-board-checkpoint"
+      || entry.customType === "pi-harness-board-delta"
+  ));
+  assert.match(opened?.content ?? "", /SESSION-A-OPEN-NOTE/);
+
+  board.closeTopic(topic);
+  await fire("session_start", {}, ctxB);
+  const closed = await fire(
+    "before_agent_start",
+    { prompt: "A observes close after B starts", systemPrompt: "system" },
+    ctxA,
+  );
+  const tombstone = messageOf(closed, "pi-harness-board-delta");
+  assert.ok(tombstone);
+  assert.match(tombstone.content, /topic_closed/);
+  assert.match(tombstone.content, new RegExp(topic));
+
+  await fire("session_shutdown", {}, ctxA);
+  await fire("session_shutdown", {}, ctxB);
+  await fire("session_start", { reason: "resume" }, runtimeContext(1_000_000));
 });
 
 test("closed candidate 的 archive 缺失或 incarnation 不匹配时保留 open cursor 并等待重试", () => {

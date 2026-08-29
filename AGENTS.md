@@ -16,7 +16,8 @@
 2. Total constant token injection (meta-principles + doctrine + tool descriptions) MUST stay < 1000 tokens.
    Current full-corpus proxy: 369 words / 2633 UTF-8 bytes, conservative estimate ≤878 tokens.
 3. Context is never silently truncated. Full knowledge indexes and participating Board notes are injected;
-   at an estimated 20% of the active model window, runtime emits one warning and preserves all content (ADR-0012).
+   same-project open topics are discovered at each user-turn boundary and feed state is isolated by session.
+   At an estimated 20% of the active model window, runtime emits one warning and preserves all content (ADR-0012).
    Passive references freeze per user turn and exact bytes persist in `.pi-board/context-snapshots/`; CRITICAL notes
    become visible, provenance-bearing messages instead of hidden references (ADR-0013).
    Completed raw thinking is the sole exception: it stays intact in session JSONL for audit but is removed from later

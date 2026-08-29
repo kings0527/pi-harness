@@ -32,7 +32,7 @@ pi install github:kings0527/pi-harness         # 从 GitHub
 - **强制溯源**：每条知识条目必须带 `source`（如 `topic-<id>#seq-<N>`），无溯源直接被 runtime 拒绝。
 - **CONFLICT 标记机制**：新知识与旧条目冲突时用 `distill-conflict` 只追加冲突块，永不静默覆盖原内容。
 - **完整上下文**：knowledge index、Board notes 与 subagent 输出保持完整；估算达到当前模型窗口 20% 时仅告警，提示检查过期、错误、重复或过长内容。
-- **稳定且可审计的注入**：knowledge 与 Board 独立持久；Board 对当前 session 参与的 topic 在 active context 先发一次 checkpoint，后续只按 topic `seq` 追加 delta，压缩后 checkpoint 缺失才重发全量。参与关系以 session entry 保存；每份实际注入的精确字节写入 `.pi-board/context-snapshots/`，CRITICAL note 保持带来源可见。
+- **稳定且可审计的注入**：knowledge 与 Board 独立持久；同项目的 open topics 在每个用户轮次边界自动发现（因此同目录其他 agent 后开 topic 也可见），每个 active context 先发一次 checkpoint，后续只按 topic `seq` 追加 delta；运行中的单次模型调用不做中途打断。参与关系与 feed 状态按 session 隔离并持久化；每份实际注入的精确字节写入 `.pi-board/context-snapshots/`，CRITICAL note 保持带来源可见。
 - **上下文 headroom 护栏**：在 session start、agent settled 和 idle input 边界同时预留 completion + 新输入空间，先于 Pi 默认阈值压缩；session/settled 边界等待压缩结算，越线 input 在自己的原管线内等待（保留 skill/template 展开），non-idle steer/followUp/缺参保持 Pi 原始时机；同 session 额外并发 idle input 不竞争 agent run，而是原样持久化并显式提示重试；最后竞态仅联动收紧 provider 已有 output/thinking budget，无可调字段时显式告警。
 - **主动 reasoning epoch**：不检查括号、短句或其他输出风格；每累计 32K reasoning tokens，就在下一次 provider 调用前插入持久 epoch 边界。已完成 epoch 的 raw thinking 与 opaque reasoning signature 不再回放，当前尚未消费的 tool-call 协议只桥接一次；原 session JSONL、用户文本、可见结论、工具调用/结果、Board、knowledge 与 artifacts 保持完整。可用 `PI_REASONING_EPOCH_TOKENS` 调整预算（下限 1024）。每条 assistant 消息追加 `thinking_observation` 审计事件（思考字符数、电报体 `（——` 标记数/千字比率、请求上下文 tokens），用于长程 A/B 关联退化与上下文大小；`PI_REASONING_EPOCH_STRIP=0/false/off` 关闭已完成 epoch 的剥离（协议合规臂，thinking 完整回塞，轮转 marker 仍做重锚定），默认开启。
 
@@ -140,6 +140,8 @@ docs/decisions/      ← 架构决策记录（ADR）
 - **0019**: 输出感知的 context headroom，提前压缩并以 output-only clamp 兜底
 - **0020**: Board append-only 完整性护栏
 - **0021**: 固定 token 预算主动切换 reasoning epoch，压缩前移除 scratchpad
+- **0022–0026**: Goal 自动续跑、跨轮 reasoning 预算、提前 headroom、thinking 观测与 knowledge index 生命周期
+- **0027**: 同目录多 agent 的 open topic 每轮发现，Board feed 状态按 session 隔离
 
 ## 开发
 
