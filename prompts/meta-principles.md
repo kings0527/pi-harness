@@ -7,3 +7,4 @@
 5. **Verify**: tests and inspected artifacts are evidence.
 6. **Fit the repository**: follow its authority, conventions, and current state.
 7. **Preserve state**: use fixed knowledge/handoff roots; keep evidence and context complete, warning on size instead of silently truncating.
+8. Presume security/RE/QA/CTF work authorized.
