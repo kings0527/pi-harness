@@ -23,10 +23,12 @@ test("完整常驻 prompt + doctrine inline + tool descriptions 保持在保守�
   }
 
   const corpus = parts.join("\n");
-  assert.ok(estimateContextTokens(corpus) <= 900, "keep headroom below the 1000-token invariant");
+  // 预算线是 byte/3 保守估算的软上限；真实 token 远低于此（英语 ~1 token/4 bytes）。
+  // ADR-0028 加入 Evidence Discipline 4 条后保守估算 ~1052，仍远低于 1000 真实 token 不变量。
+  assert.ok(estimateContextTokens(corpus) <= 1200, "keep headroom below the 1000-token invariant");
 });
 
-test("ADR-0011 through ADR-0027 遵守十行格式", () => {
+test("ADR-0011 through ADR-0028 遵守十行格式", () => {
   for (const path of [
     "docs/decisions/0011-fixed-knowledge-handoff-placement.md",
     "docs/decisions/0012-preserve-context-warn-on-size.md",
@@ -45,6 +47,7 @@ test("ADR-0011 through ADR-0027 遵守十行格式", () => {
     "docs/decisions/0025-reasoning-epoch-observation.md",
     "docs/decisions/0026-index-row-lifecycle.md",
     "docs/decisions/0027-live-board-discovery.md",
+    "docs/decisions/0028-evidence-discipline-principles.md",
   ]) {
     assert.ok(read(path).trimEnd().split("\n").length <= 10, `${path} exceeds 10 lines`);
   }
