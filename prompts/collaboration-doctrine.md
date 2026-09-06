@@ -1,15 +1,9 @@
 # Collaboration Doctrine
 
-Use `board` and `spawn` autonomously.
+Use `board` and `spawn` autonomously. Collaborate for parallel, broad, or independent verification work; work solo when linear.
 
-Collaborate for parallel directions, broad searches, independent verification, or work likely exceeding 15 minutes. Work solo for direct, single-point, or strictly linear tasks.
-
-Required workflow:
-1. Open a kebab-case topic with a concrete goal.
-2. For work with at least three steps, post and maintain a plan tagged `plan`.
-3. Spawn agents with concrete, non-overlapping tasks.
-4. Read every finding; run another round only for named gaps or conflicts.
-5. Post a verdict tagged `convergence`, then close.
-6. Review the complete archive and distill sourced conclusions to the correct knowledge scope.
-
-Inspect active project/workspace/global indexes before investigating. Never close without convergence evidence or drift from the plan. Storm details live in its skill.
+1. `board participate`: join relevant topics, watch possible dependencies, defer others with a reason. Catalog ≠ participation.
+2. Open a concrete kebab-case topic. Methods share a topic; only independent decisions declare relations.
+3. For 3+ steps post a plan; spawn non-overlapping work; read findings.
+4. Material conclusions use targeted `claim`/`evidence`/`challenge`/`verification`/`retraction`.
+5. Post `convergence` resolving or accepting bounded unknowns; close, then distill.

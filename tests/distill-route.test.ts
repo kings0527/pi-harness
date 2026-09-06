@@ -31,7 +31,7 @@ before(async () => {
   globalRoot = join(homeDir, ".pi-harness", "knowledge");
 
   const registerExtension = (await import(`../extensions/board.ts?test=${Date.now()}`)).default;
-  await registerExtension({ registerTool(tool: any) { boardTool = tool; } });
+  await registerExtension({ on() {}, registerTool(tool: any) { boardTool = tool; } });
 });
 
 after(() => {

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { listOpenTopics } from "../core/board/index.ts";
+import { listOpenTopicCatalog } from "../core/board/index.ts";
+import { boundedExcerpt, boundedIntEnv } from "../core/text-budget/index.ts";
 import {
   buildBoardDelivery,
   boardCriticalKey,
@@ -20,6 +21,8 @@ const LEGACY_REFERENCE_MESSAGE_TYPE = "pi-harness-reference";
 const KNOWLEDGE_MESSAGE_TYPE = "pi-harness-knowledge-reference";
 const BOARD_CHECKPOINT_MESSAGE_TYPE = "pi-harness-board-checkpoint";
 const BOARD_DELTA_MESSAGE_TYPE = "pi-harness-board-delta";
+const BOARD_CATALOG_MESSAGE_TYPE = "pi-harness-board-catalog";
+const BOARD_CATALOG_DELTA_MESSAGE_TYPE = "pi-harness-board-catalog-delta";
 const CRITICAL_MESSAGE_TYPE = "pi-harness-board-critical";
 const CONTEXT_SNAPSHOT_ENTRY_TYPE = "pi-harness-context-snapshot";
 const BOARD_PARTICIPATION_ENTRY_TYPE = "pi-harness-board-participation";
@@ -28,12 +31,17 @@ const RUNTIME_REFERENCE_TYPES = new Set([
   KNOWLEDGE_MESSAGE_TYPE,
   BOARD_CHECKPOINT_MESSAGE_TYPE,
   BOARD_DELTA_MESSAGE_TYPE,
+  BOARD_CATALOG_MESSAGE_TYPE,
+  BOARD_CATALOG_DELTA_MESSAGE_TYPE,
   CRITICAL_MESSAGE_TYPE,
 ]);
 
 interface SessionFeedState {
   activeKnowledgeScopes: Set<string>;
+  /** Only joined topics may contribute note bodies or CRITICAL messages. */
   participatingTopics: Set<string>;
+  /** Explicit metadata-only relationship, persisted for audit and resume. */
+  participationModes: Map<string, "join" | "watch" | "defer">;
   participationReady: boolean;
   lastSizeWarningKey: string | null;
   lastHealthWarningKey: string | null;
@@ -41,7 +49,20 @@ interface SessionFeedState {
 }
 
 const sessionStates = new Map<string, SessionFeedState>();
-const pendingDeliveryByTurn = new WeakMap<object, { board?: any; critical?: any }>();
+const pendingDeliveryByTurn = new WeakMap<object, { catalog?: any; board?: any; critical?: any }>();
+
+interface CatalogSnapshot {
+  id: string;
+  rowDigestByTopic: Record<string, string>;
+}
+
+interface CatalogReference {
+  content: string;
+  sourceDigest: string;
+  rowDigestByTopic: Record<string, string>;
+  mode: "checkpoint" | "delta";
+  changed: boolean;
+}
 
 function sessionId(ctx: any): string {
   try {
@@ -57,6 +78,7 @@ function emptySessionState(): SessionFeedState {
   return {
     activeKnowledgeScopes: new Set(),
     participatingTopics: new Set(),
+    participationModes: new Map(),
     participationReady: false,
     lastSizeWarningKey: null,
     lastHealthWarningKey: null,
@@ -83,7 +105,7 @@ interface FrozenReference {
   content: string;
   bytes: number;
   frozenAt: number;
-  kind: "knowledge" | "board-checkpoint" | "board-delta" | "board-critical";
+  kind: "knowledge" | "board-catalog" | "board-catalog-delta" | "board-checkpoint" | "board-delta" | "board-critical";
 }
 
 function sha256(value: string): string {
@@ -241,6 +263,38 @@ function latestActiveSnapshotId(entries: any[], customType: string): string | un
   return undefined;
 }
 
+/**
+ * New catalog messages persist the complete row-digest state in metadata, so
+ * one retained delta remains sufficient after compaction. Legacy catalog
+ * messages lack that state and intentionally trigger one fresh checkpoint.
+ */
+function latestCatalogSnapshot(entries: any[]): CatalogSnapshot | undefined {
+  // A delta has meaning only alongside a retained checkpoint. If compaction
+  // removed that base, emit a new complete catalog rather than making rows
+  // invisible or assuming model memory survived.
+  if (!entries.some(entry => entry?.type === "custom_message"
+    && entry.customType === BOARD_CATALOG_MESSAGE_TYPE
+    // Old full catalogs had no mode; new deltas explicitly say delta.
+    && (entry.details?.mode === undefined || entry.details?.mode === "checkpoint"))) {
+    return undefined;
+  }
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type !== "custom_message") continue;
+    if (entry.customType !== BOARD_CATALOG_MESSAGE_TYPE
+      && entry.customType !== BOARD_CATALOG_DELTA_MESSAGE_TYPE) continue;
+    const id = entry.details?.snapshotId;
+    const rows = entry.details?.catalogRowDigests;
+    if (typeof id !== "string" || !rows || typeof rows !== "object" || Array.isArray(rows)) continue;
+    const rowDigestByTopic: Record<string, string> = {};
+    for (const [topic, digest] of Object.entries(rows)) {
+      if (typeof digest === "string") rowDigestByTopic[topic] = digest;
+    }
+    return { id, rowDigestByTopic };
+  }
+  return undefined;
+}
+
 function contextSnapshotMetadata(entries: any[]): Map<string, Record<string, any>> {
   const bySnapshotId = new Map<string, Record<string, any>>();
   for (const entry of entries) {
@@ -280,8 +334,30 @@ function activeBoardDeliveryDetails(entries: any[], metadataEntries: any[]): unk
     });
 }
 
+function setParticipation(
+  pi: any,
+  state: SessionFeedState,
+  topic: string,
+  mode: "join" | "watch" | "defer",
+  reason?: string,
+  legacy = false,
+): void {
+  state.participationModes.set(topic, mode);
+  if (mode === "join") state.participatingTopics.add(topic);
+  else state.participatingTopics.delete(topic);
+  pi.appendEntry?.(BOARD_PARTICIPATION_ENTRY_TYPE, {
+    action: "set",
+    topic,
+    mode,
+    ...(reason && { reason }),
+    ...(legacy && { legacy }),
+    changedAt: Date.now(),
+  });
+}
+
 function restoreParticipatingTopics(pi: any, ctx: any, state: SessionFeedState): boolean {
   state.participatingTopics.clear();
+  state.participationModes.clear();
   const entries = activeEntries(ctx);
   const branch = ctx?.sessionManager?.getBranch?.();
   const history = Array.isArray(branch) ? branch : entries;
@@ -291,13 +367,28 @@ function restoreParticipatingTopics(pi: any, ctx: any, state: SessionFeedState):
     if (entry?.type !== "custom" || entry.customType !== BOARD_PARTICIPATION_ENTRY_TYPE) continue;
     const data = entry.data;
     if (!data || typeof data !== "object") continue;
-    if (data.action === "initialize" && Array.isArray(data.topics)) {
+    if (data.action === "set" && typeof data.topic === "string"
+      && ["join", "watch", "defer"].includes(data.mode)) {
+      state.participationModes.set(data.topic, data.mode);
+      if (data.mode === "join") state.participatingTopics.add(data.topic);
+      else state.participatingTopics.delete(data.topic);
+      hasPersistedInitialization = true;
+    } else if (data.action === "initialize-catalog-only") {
+      hasPersistedInitialization = true;
+    } else if (data.action === "initialize" && Array.isArray(data.topics)) {
+      // Pre-ADR-0029 initialization meant full participation; retain it so a
+      // resumed legacy session never silently loses previously injected work.
       hasPersistedInitialization = true;
       for (const topic of data.topics) {
-        if (typeof topic === "string" && topic.length > 0) state.participatingTopics.add(topic);
+        if (typeof topic === "string" && topic.length > 0) {
+          state.participationModes.set(topic, "join");
+          state.participatingTopics.add(topic);
+        }
       }
     } else if (data.action === "join" && typeof data.topic === "string" && data.topic.length > 0) {
+      state.participationModes.set(data.topic, "join");
       state.participatingTopics.add(data.topic);
+      hasPersistedInitialization = true;
     }
   }
 
@@ -306,51 +397,114 @@ function restoreParticipatingTopics(pi: any, ctx: any, state: SessionFeedState):
   const historicalCoverage = deriveBoardCoverage(activeBoardDeliveryDetails(history, history));
   if (historicalCoverage.hasCheckpoint) {
     hasPersistedInitialization = true;
-    for (const topic of Object.keys(historicalCoverage.topicStates)) state.participatingTopics.add(topic);
+    for (const topic of Object.keys(historicalCoverage.topicStates)) {
+      // Pre-ADR-0029 references already exposed the full body. Preserve their
+      // membership on resume; do not retroactively claim catalog-only.
+      state.participationModes.set(topic, "join");
+      state.participatingTopics.add(topic);
+    }
   }
   if (hasPersistedInitialization) return true;
 
-  // Preserve the original join behavior for a genuinely new session: topics
-  // already open when the session starts are the topics this agent joins.
-  try {
-    for (const topic of listOpenTopics()) state.participatingTopics.add(topic.id);
-  } catch {
-    // Do not persist an empty visibility set when the source could not be
-    // listed. The first turn retries instead of silently losing participation.
-    return false;
-  }
+  // Fresh sessions are catalog-only by default. Discovery and full evidence
+  // participation are deliberately separate (ADR-0029).
+  try { listOpenTopicCatalog(); } catch { return false; }
   pi.appendEntry?.(BOARD_PARTICIPATION_ENTRY_TYPE, {
-    action: "initialize",
-    topics: [...state.participatingTopics].sort(),
+    action: "initialize-catalog-only",
+    topics: [],
     joinedAt: Date.now(),
   });
   return true;
 }
 
 /**
- * Pull project-wide open-topic membership at every turn boundary. Separate Pi
- * processes share the same `.pi-board`, but they do not share in-memory tool
- * events, so startup-only membership would permanently miss a peer-created
- * topic. Persist each discovered join in this session for resume/close replay.
+ * Return metadata for every open/closed Board topic without granting note-body
+ * visibility. This is the shared-directory discovery channel; it intentionally
+ * never mutates participation state.
  */
-function discoverPeerTopics(pi: any, state: SessionFeedState): boolean {
-  let topics;
-  try {
-    topics = listOpenTopics();
-  } catch {
-    return false;
+function boundedCatalogList(values: readonly string[], cap: number, label: string): string {
+  if (values.length === 0) return "";
+  const itemCap = boundedIntEnv("PI_BOARD_CATALOG_ITEM_EXCERPT_BYTES", 240);
+  const shown = values.slice(0, cap).map(value => boundedExcerpt(value, itemCap)).join(",");
+  const overflow = values.length > cap ? ` ${label}_total=${values.length}` : "";
+  return ` ${label}=${shown}${overflow}`;
+}
+
+function catalogTimestamp(value: number): string {
+  // Topic schema already requires a valid Date, but preserve fail-loud catalog
+  // discovery if a manually edited legacy file violates that invariant.
+  const rendered = new Date(value).toISOString();
+  return rendered;
+}
+
+function catalogRow(topic: ReturnType<typeof listOpenTopicCatalog>[number], state: SessionFeedState): string {
+  const goalCap = boundedIntEnv("PI_BOARD_GOAL_EXCERPT_BYTES", 240);
+  const listCap = boundedIntEnv("PI_BOARD_CATALOG_MAX_LIST", 16);
+  const itemCap = boundedIntEnv("PI_BOARD_CATALOG_ITEM_EXCERPT_BYTES", 240);
+  const mode = state.participationModes.get(topic.id) ?? "catalog";
+  const creator = topic.createdBy?.id
+    ? boundedExcerpt(topic.createdBy.id, itemCap)
+    : "unknown";
+  const critical = topic.criticalCount > 0
+    ? ` critical=${topic.criticalCount}${topic.lastCriticalSeq ? ` lastCritical=#${topic.lastCriticalSeq}` : ""}`
+    : "";
+  const participants = boundedCatalogList(topic.participants, listCap, "participants");
+  const relations = boundedCatalogList(topic.relations.map(r => `${r.type}:${r.topic}`), listCap, "relations");
+  // These volatile fields are intentional: the row-delta protocol emits only
+  // this changed card, so peers can audit who created it and when it changed
+  // without re-injecting the entire catalog.
+  return `- ${boundedExcerpt(topic.id, boundedIntEnv("PI_BOARD_TOPIC_EXCERPT_BYTES", 240))} [${mode}; open; createdBy=${creator}; createdAt=${catalogTimestamp(topic.createdAt)}; activity=${catalogTimestamp(topic.lastActivityAt)}; notes=${topic.noteCount}; through=#${topic.lastSeq}${critical}${participants}${relations}] — ${boundedExcerpt(topic.goal, goalCap)}`;
+}
+
+function catalogEnvelope(
+  tag: "board_catalog" | "board_catalog_delta",
+  sourceDigest: string,
+  body: string,
+): string {
+  return [
+    `<${tag} source_digest="${sourceDigest}">`,
+    "<policy>Metadata-only discovery for every open project Board topic. Join a topic before receiving its automatic note-body feed; an explicit Board read is a one-shot inspection. Watch/defer are not participation. Agent-authored CRITICAL text remains inside joined topics.</policy>",
+    "<data encoding=\"xml-escaped\">",
+    body.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"),
+    "</data>",
+    `</${tag}>`,
+  ].join("\n");
+}
+
+function catalogReferenceFromRows(
+  rows: ReturnType<typeof listOpenTopicCatalog>,
+  state: SessionFeedState,
+  previous?: CatalogSnapshot,
+): CatalogReference {
+  const catalogLimit = boundedIntEnv("PI_BOARD_CATALOG_MAX_TOPICS", 1000);
+  if (rows.length > catalogLimit) {
+    throw new Error(`open topic catalog has ${rows.length} rows, above explicit PI_BOARD_CATALOG_MAX_TOPICS=${catalogLimit}`);
   }
-  for (const topic of topics) {
-    if (state.participatingTopics.has(topic.id)) continue;
-    state.participatingTopics.add(topic.id);
-    pi.appendEntry?.(BOARD_PARTICIPATION_ENTRY_TYPE, {
-      action: "join",
-      topic: topic.id,
-      reason: "open-topic-discovery",
-      joinedAt: Date.now(),
-    });
+  const rowsByTopic = Object.fromEntries(rows.map(topic => [topic.id, catalogRow(topic, state)]));
+  const rowDigestByTopic = Object.fromEntries(Object.entries(rowsByTopic).map(([topic, row]) => [topic, sha256(row)]));
+  const isCheckpoint = !previous;
+  const changed = Object.entries(rowsByTopic)
+    .filter(([topic, row]) => isCheckpoint || previous.rowDigestByTopic[topic] !== sha256(row))
+    .map(([, row]) => row);
+  const closed = previous
+    ? Object.keys(previous.rowDigestByTopic).filter(topic => !Object.hasOwn(rowsByTopic, topic))
+      .map(topic => `<topic_closed id="${boundedExcerpt(topic, boundedIntEnv("PI_BOARD_TOPIC_EXCERPT_BYTES", 240))}" />`)
+    : [];
+  const changedAny = isCheckpoint || changed.length > 0 || closed.length > 0;
+  const body = [...changed, ...closed].join("\n");
+  const sourceDigest = sha256(body);
+  if (!changedAny) return { sourceDigest, content: "", rowDigestByTopic, mode: "delta", changed: false };
+  const content = catalogEnvelope(isCheckpoint ? "board_catalog" : "board_catalog_delta", sourceDigest, body || "[no open Board topics]");
+  const contentCap = boundedIntEnv("PI_BOARD_CATALOG_MAX_BYTES", 64000);
+  const contentBytes = Buffer.byteLength(content, "utf-8");
+  if (contentBytes > contentCap) {
+    throw new Error(`Board catalog ${isCheckpoint ? "checkpoint" : "delta"} is ${contentBytes} escaped bytes, above explicit PI_BOARD_CATALOG_MAX_BYTES=${contentCap}`);
   }
-  return true;
+  return { sourceDigest, content, rowDigestByTopic, mode: isCheckpoint ? "checkpoint" : "delta", changed: true };
+}
+
+function buildCatalogReference(state: SessionFeedState, previous?: CatalogSnapshot): CatalogReference {
+  return catalogReferenceFromRows(listOpenTopicCatalog(), state, previous);
 }
 
 function unavailableBoardDelivery(warning: string): BoardDelivery {
@@ -389,6 +543,8 @@ function activeBoardReferenceBytes(entries: any[], metadataEntries: any[]): numb
     }
     if (entry.customType !== BOARD_CHECKPOINT_MESSAGE_TYPE
       && entry.customType !== BOARD_DELTA_MESSAGE_TYPE
+      && entry.customType !== BOARD_CATALOG_MESSAGE_TYPE
+      && entry.customType !== BOARD_CATALOG_DELTA_MESSAGE_TYPE
       && entry.customType !== CRITICAL_MESSAGE_TYPE) continue;
     const content = typeof entry.content === "string"
       ? entry.content
@@ -474,16 +630,18 @@ export default async function (pi: any) {
     if (toolName !== "board" || event.isError === true) return;
     const input = event.input || event.args || {};
     const state = stateFor(ctx);
-    if ((input.action !== "open" && input.action !== "post")
-      || typeof input.topic !== "string"
-      || input.topic.length === 0
-      || state.participatingTopics.has(input.topic)) return;
-    state.participatingTopics.add(input.topic);
-    pi.appendEntry?.(BOARD_PARTICIPATION_ENTRY_TYPE, {
-      action: "join",
-      topic: input.topic,
-      joinedAt: Date.now(),
-    });
+    if (typeof input.topic !== "string" || input.topic.length === 0) return;
+    if (input.action === "participate") {
+      if (["join", "watch", "defer"].includes(input.mode)) {
+        setParticipation(pi, state, input.topic, input.mode, input.reason);
+      }
+      return;
+    }
+    // Mutating a topic is an explicit act of participation, unlike merely
+    // discovering a peer topic in the shared catalog.
+    if ((input.action === "open" || input.action === "post") && !state.participatingTopics.has(input.topic)) {
+      setParticipation(pi, state, input.topic, "join", "local-board-mutation");
+    }
   });
 
   pi.on("tool_call", async (event: any, ctx: any) => {
@@ -502,7 +660,7 @@ export default async function (pi: any) {
   // First handler plans one user-turn delivery and emits the independent
   // knowledge message. Later handlers persist Board delta and CRITICAL updates.
   pi.on("before_agent_start", async (event: any, ctx: any) => {
-    const pending: { board?: any; critical?: any } = {};
+    const pending: { catalog?: any; board?: any; critical?: any } = {};
     pendingDeliveryByTurn.set(ctx, pending);
     const entries = activeEntries(ctx);
     const branch = ctx?.sessionManager?.getBranch?.();
@@ -511,18 +669,48 @@ export default async function (pi: any) {
     const knowledge = buildKnowledgeSnapshot([...state.activeKnowledgeScopes]);
     const knowledgeReference = buildKnowledgeReference(knowledge);
     const coverage = deriveBoardCoverage(activeBoardDeliveryDetails(entries, metadataEntries));
-    if (!state.participationReady) {
+    if (!state.participationReady && state.participationModes.size === 0) {
       state.participationReady = restoreParticipatingTopics(pi, ctx, state);
     }
-    if (state.participationReady && !discoverPeerTopics(pi, state)) {
-      state.participationReady = false;
-    }
+    let catalog: CatalogReference | undefined;
+    try {
+      catalog = buildCatalogReference(state, latestCatalogSnapshot(entries));
+      // A prior startup listing may have failed while a later explicit join was
+      // recorded. A successful current catalog proves discovery is usable; do
+      // not call restore again and erase that in-memory explicit choice.
+      state.participationReady = true;
+    } catch { state.participationReady = false; }
     const board = state.participationReady
       ? buildBoardDelivery(state.participatingTopics, coverage)
-      : unavailableBoardDelivery("Board participation discovery failed; delivery deferred");
+      : unavailableBoardDelivery("Board catalog or participation discovery failed; delivery deferred");
     const activeCritical = activeCriticalKeys(entries, board);
     emitHealthWarning(state, knowledge.issues);
     emitBoardWarning(state, board.warnings ?? []);
+
+    const frozenCatalog = catalog?.changed && freezeReference(
+      pi,
+      event,
+      catalog.content,
+      catalog.mode === "checkpoint" ? "board-catalog" : "board-catalog-delta",
+      catalog.sourceDigest,
+      {
+        boardCatalogBytes: Buffer.byteLength(catalog.content, "utf-8"),
+        catalogRowDigests: catalog.rowDigestByTopic,
+      },
+    );
+    const catalogUpdate = frozenCatalog && catalog
+      ? hiddenMessage(
+        // Keep the established customType for existing sessions/extensions;
+        // `details.mode` and the XML tag distinguish a compact delta.
+        BOARD_CATALOG_MESSAGE_TYPE,
+        frozenCatalog,
+        {
+          kind: catalog.mode === "checkpoint" ? "board-catalog" : "board-catalog-delta",
+          mode: catalog.mode,
+          catalogRowDigests: catalog.rowDigestByTopic,
+        },
+      )
+      : undefined;
 
     const frozenKnowledge = freezeReference(
       pi,
@@ -585,6 +773,7 @@ export default async function (pi: any) {
     }
     const retainedContent = persistedRuntimeReferenceContent(entries);
     const newBoardContent = [
+      catalogUpdate?.content,
       boardUpdate?.content,
       criticalContent,
     ].filter(Boolean).join("\n\n");
@@ -593,6 +782,7 @@ export default async function (pi: any) {
     const injectedContent = [
       retainedContent,
       knowledgeUpdate?.content,
+      catalogUpdate?.content,
       boardUpdate?.content,
       criticalContent,
     ].filter(Boolean).join("\n\n");
@@ -614,7 +804,13 @@ export default async function (pi: any) {
         ctx,
       );
     }
+    if (catalogUpdate) pending.catalog = catalogUpdate;
     return knowledgeUpdate ? { message: knowledgeUpdate } : undefined;
+  });
+
+  pi.on("before_agent_start", async (_event: any, ctx: any) => {
+    const message = pendingDeliveryByTurn.get(ctx)?.catalog;
+    return message ? { message } : undefined;
   });
 
   pi.on("before_agent_start", async (_event: any, ctx: any) => {

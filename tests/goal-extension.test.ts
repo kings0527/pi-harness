@@ -23,6 +23,7 @@ function runtimeContext(sessionId: string, contextWindow = 1_000_000, idle = tru
   return {
     sessionManager: {
       getSessionId: () => sessionId,
+      getSessionFile: () => `/sessions/${sessionId}.jsonl`,
       buildContextEntries: () => activeEntries,
       getBranch: () => activeEntries,
     },
@@ -149,6 +150,18 @@ test("/goal <objective> persists the visible command and starts execution immedi
   const realResults = await startTurn(sessionId, "real work");
   assert.ok(goalMessage(realResults));
   assert.equal(goal.getGoal(sessionId)?.userTurnCount, 1);
+});
+
+test("/goal echo is bounded while the stored objective remains exact", async () => {
+  const sessionId = "extension-fat-echo";
+  const objective = `BEGIN-${"A".repeat(5_000)}-END`;
+  await goalCommand.handler(objective, runtimeContext(sessionId));
+  assert.equal(goal.getGoal(sessionId)?.text, objective);
+  assert.equal(sentUserMessages.length, 1);
+  assert.ok(Buffer.byteLength(sentUserMessages[0].content, "utf-8") < 1_300);
+  assert.match(sentUserMessages[0].content, /\[excerpt 1024\/\d+ bytes sha256=/);
+  assert.match(sentUserMessages[0].content, /full objective remains available via \/goal status/);
+  assert.doesNotMatch(sentUserMessages[0].content, /-END/);
 });
 
 test("/goal waits for an active run to settle before starting the replacement objective", async () => {

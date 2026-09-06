@@ -88,6 +88,24 @@ test("completion requires the exact persisted Board note and current goal id", (
   assert.equal(completed?.evidence?.noteSeq, bound.seq);
 });
 
+test("oversized active goal is explicitly excerpted after XML escaping and events keep only audit metadata", () => {
+  const fat = `BEGIN-${"&".repeat(20_000)}-END`;
+  const state = goal.setGoal("session-fat-goal", fat);
+  const rendered = goal.renderGoalReference(state);
+  const continued = goal.renderGoalContinueMessage(state, 1, 4);
+  const eventLog = readFileSync(join(workDir, ".pi-board", "events.jsonl"), "utf-8");
+
+  assert.ok(Buffer.byteLength(rendered, "utf-8") <= 20_000, "default 8KiB escaped text cap plus fixed wrapper");
+  assert.ok(Buffer.byteLength(continued, "utf-8") <= 20_000);
+  assert.match(rendered, /\[excerpt \d+\/\d+ bytes sha256=[a-f0-9]{64}; retrieve via/);
+  assert.match(continued, /\[excerpt \d+\/\d+ bytes sha256=[a-f0-9]{64}; retrieve via/);
+  assert.doesNotMatch(rendered, /-END/);
+  assert.doesNotMatch(eventLog, /BEGIN-/);
+  assert.match(eventLog, /"textBytes":/);
+  assert.match(eventLog, /"textDigest":"[a-f0-9]{64}"/);
+  assert.equal(goal.getGoal("session-fat-goal")?.text, fat, "stored source remains exact and readable");
+});
+
 test("goal reference snapshots are content-addressed and preserve exact bytes", () => {
   const created = goal.setGoal("session-snapshot", "verify <goal> & evidence");
   const firstTurn = goal.beginGoalTurn("session-snapshot", created.id)!;

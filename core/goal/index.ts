@@ -10,6 +10,7 @@ import { basename, join } from "node:path";
 import { readNotes } from "../board/index.ts";
 import type { Note } from "../board/types.ts";
 import { writeContextSnapshot, type ContextSnapshotFile } from "../context-snapshot/index.ts";
+import { boundedEscapedXmlText, boundedIntEnv } from "../text-budget/index.ts";
 import { appendEvent } from "../events/index.ts";
 import { ensureDir, getStorageRoot } from "../storage/index.ts";
 
@@ -112,11 +113,11 @@ export function setGoal(sessionId: string, text: string): GoalState {
     appendEvent("goal_replaced", {
       sessionId: normalizedSessionId,
       previousGoalId: previous.id,
-      previousText: previous.text,
+      previous: goalEventText(previous.text),
       nextGoalId: state.id,
     });
   }
-  appendEvent("goal_set", { sessionId: normalizedSessionId, goalId: state.id, text: state.text });
+  appendEvent("goal_set", { sessionId: normalizedSessionId, goalId: state.id, ...goalEventText(state.text) });
   return state;
 }
 
@@ -219,7 +220,7 @@ export function completeGoalFromBoardNote(
   appendEvent("goal_achieved", {
     sessionId: current.sessionId,
     goalId: current.id,
-    text: current.text,
+    ...goalEventText(current.text),
     userTurnCount: current.userTurnCount,
     evidence,
     achievedAt,
@@ -235,30 +236,36 @@ export function clearGoal(sessionId: string): GoalState | null {
   appendEvent("goal_cleared", {
     sessionId: current.sessionId,
     goalId: current.id,
-    text: current.text,
+    ...goalEventText(current.text),
     status: current.status,
     userTurnCount: current.userTurnCount,
   });
   return current;
 }
 
-function escapeXml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
+function goalEventText(text: string): { textBytes: number; textDigest: string } {
+  return {
+    textBytes: Buffer.byteLength(text, "utf-8"),
+    textDigest: createHash("sha256").update(text, "utf-8").digest("hex"),
+  };
+}
+
+function renderedGoalText(goal: GoalState): string {
+  return boundedEscapedXmlText(
+    goal.text,
+    boundedIntEnv("PI_GOAL_REFERENCE_TEXT_BYTES", 8192),
+    `/goal status or ${getGoalFilePath(goal.sessionId)}`,
+  );
 }
 
 export function renderGoalReference(goal: GoalState): string {
   const evidenceTag = goalEvidenceTag(goal.id);
   return [
-    `<active_goal id="${escapeXml(goal.id)}" scope="current-session">`,
+    `<active_goal id="${goal.id}" scope="current-session">`,
     "<instruction>This is the persistent execution target for the current session. Every action should serve it.</instruction>",
     "<execution_policy>Work autonomously within the stated goal and existing permissions until achieved. When several viable routes exist, choose the best evidence-backed, reversible route and execute it; do not stop to ask the user to pick or merely offer next steps. Request user input only when every meaningful route is blocked by essential information or permission that cannot be inferred or obtained. Otherwise state assumptions and keep working.</execution_policy>",
-    `<objective>${escapeXml(goal.text)}</objective>`,
-    `<completion required_tags="${GOAL_MET_TAG} ${escapeXml(evidenceTag)}">When fully achieved, post a Board note containing completion evidence with both required tags.</completion>`,
+    `<objective>${renderedGoalText(goal)}</objective>`,
+    `<completion required_tags="${GOAL_MET_TAG} ${evidenceTag}">When fully achieved, post a Board note containing completion evidence with both required tags.</completion>`,
     "</active_goal>",
   ].join("\n");
 }
@@ -285,10 +292,10 @@ export function shouldAutoContinueGoal(
 export function renderGoalContinueMessage(goal: GoalState, attempt: number, limit: number): string {
   const evidenceTag = goalEvidenceTag(goal.id);
   return [
-    `<goal_continue id="${escapeXml(goal.id)}" scope="current-session" attempt="${attempt}" limit="${limit}">`,
+    `<goal_continue id="${goal.id}" scope="current-session" attempt="${attempt}" limit="${limit}">`,
     "<instruction>This is an automatic continuation, not a new user request. The active goal is not achieved yet: keep working toward it instead of stopping to report progress.</instruction>",
-    `<objective>${escapeXml(goal.text)}</objective>`,
-    `<completion required_tags="${GOAL_MET_TAG} ${escapeXml(evidenceTag)}">When fully achieved, post a Board note containing completion evidence with both required tags.</completion>`,
+    `<objective>${renderedGoalText(goal)}</objective>`,
+    `<completion required_tags="${GOAL_MET_TAG} ${evidenceTag}">When fully achieved, post a Board note containing completion evidence with both required tags.</completion>`,
     "<blocker>If every meaningful route is blocked by missing information or permissions, state exactly what is missing and stop; do not fabricate progress.</blocker>",
     "</goal_continue>",
   ].join("\n");

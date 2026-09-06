@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { readNotes } from "./index.ts";
 import type { Note } from "./types.ts";
+import { boundedExcerpt, boundedIntEnv } from "../text-budget/index.ts";
 
 interface DigestCache {
   lastSeq: number;
@@ -30,12 +32,28 @@ export interface ReferenceDigestResult extends DigestResult {
   cursorReset: boolean;
 }
 
+/**
+ * Oversized note bodies never enter the automatic feed verbatim (ADR-0030).
+ * The stub is explicit and deterministic: it declares the withheld byte count
+ * and the sha256 of the complete body, which stays retrievable on disk.
+ */
+export function inlineNoteBody(content: string): string {
+  const cap = boundedIntEnv("PI_BOARD_INLINE_NOTE_MAX_BYTES", 32768);
+  const bytes = Buffer.byteLength(content, "utf-8");
+  if (bytes <= cap) return content;
+  const digest = createHash("sha256").update(content, "utf-8").digest("hex");
+  return `[note body withheld from feed: ${bytes} bytes, sha256=${digest}; retrieve via board action=read on the enclosing Board topic, or .pi-board/topics/<id>.jsonl (open) / .pi-board/topics/archive/<id>.jsonl (closed)]`;
+}
+
 function formatNote(note: Note): string {
   const markers: string[] = [];
   if (note.tags?.includes("plan")) markers.push("PLAN");
   if (note.priority === "critical") markers.push("CRITICAL");
   const marker = markers.length > 0 ? `[${markers.join("][")}] ` : "";
-  return `${marker}#${note.seq} ${note.author}: ${note.content}`;
+  // Author is user-controlled display metadata. Bound it independently so one
+  // malicious label cannot consume a whole reference before body safeguards run.
+  const author = boundedExcerpt(note.author, boundedIntEnv("PI_BOARD_AUTHOR_EXCERPT_BYTES", 240));
+  return `${marker}#${note.seq} ${author}: ${inlineNoteBody(note.content)}`;
 }
 
 function formatCompleteDigest(notes: Note[]): string {

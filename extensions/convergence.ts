@@ -1,7 +1,7 @@
-import { readNotes } from "../core/board/index.ts";
+import { assessCloseReadiness, listOpenTopics, readNotes } from "../core/board/index.ts";
 import { appendEvent } from "../core/events/index.ts";
 
-const CLOSE_BLOCK_REASON = `Board close blocked: no convergence note found. First evaluate the board against the topic goal, then post your verdict with tags=["convergence"] (state why the goal is or isn't met). If gaps remain, spawn another round instead of closing.`;
+const CLOSE_BLOCK_REASON = `Board close blocked: no convergence verdict or unresolved material claim/challenge remains. Post a structured convergence note with a runtime actor and verdict; verify/retract/challenge material claims, or explicitly list accepted bounded unresolved references.`;
 
 export default async function(pi: any) {
   // Per-topic spawn 轮次计数（进程内有效）
@@ -20,15 +20,22 @@ export default async function(pi: any) {
     } catch {
       return; // topic 不存在等 —— 交给 board 工具自己报错
     }
-    const hasConvergence = notes.some(n => Array.isArray(n.tags) && n.tags.includes("convergence"));
+    // Legacy topics retain their prior tag gate. New actor-created topics are
+    // structured from creation even before their first typed note, so a caller
+    // cannot bypass the readiness graph with tags=["convergence"].
+    const topic = listOpenTopics().find(item => item.id === input.topic);
+    const structured = Boolean(topic?.createdBy) || notes.some(note => note.kind !== undefined);
+    const readiness = structured ? assessCloseReadiness(input.topic) : undefined;
+    const hasConvergence = readiness ? readiness.ready : notes.some(n => Array.isArray(n.tags) && n.tags.includes("convergence"));
     if (hasConvergence) return;
 
+    const reason = readiness?.reason ? `${CLOSE_BLOCK_REASON} Current blocker: ${readiness.reason}.` : CLOSE_BLOCK_REASON;
     appendEvent("hook_block", {
       rule: "convergence-gate",
       topic: input.topic,
-      reason: CLOSE_BLOCK_REASON,
+      reason,
     });
-    return { block: true, reason: CLOSE_BLOCK_REASON };
+    return { block: true, reason };
   });
 
   // Hook B: 轮次护栏 —— 只观测提醒，不阻止（判断归 LLM）

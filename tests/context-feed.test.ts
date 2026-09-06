@@ -20,6 +20,7 @@ import {
 
 let originalCwd: string;
 let originalHome: string | undefined;
+let originalCatalogLimit: string | undefined;
 let sandbox: string;
 let workspaceDir: string;
 let projectDir: string;
@@ -33,6 +34,7 @@ let board: typeof import("../core/board/index.ts");
 before(async () => {
   originalCwd = process.cwd();
   originalHome = process.env.HOME;
+  originalCatalogLimit = process.env.PI_BOARD_CATALOG_MAX_TOPICS;
   sandbox = realpathSync(mkdtempSync(join(tmpdir(), "pi-harness-context-feed-test-")));
   workspaceDir = join(sandbox, "exp");
   projectDir = join(workspaceDir, "a");
@@ -95,12 +97,21 @@ before(async () => {
     },
   });
   await fire("session_start", {}, runtimeContext(1_000_000));
+  // P0 is catalog-only by default. Existing fixture tests exercise a joined
+  // work topic explicitly; separate tests below assert unjoined isolation.
+  await fire("tool_result", {
+    tool: "board",
+    input: { action: "participate", topic: "complete-context", mode: "join", reason: "fixture" },
+    result: { ok: true },
+  }, runtimeContext(1_000_000));
 });
 
 after(() => {
   process.chdir(originalCwd);
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
+  if (originalCatalogLimit === undefined) delete process.env.PI_BOARD_CATALOG_MAX_TOPICS;
+  else process.env.PI_BOARD_CATALOG_MAX_TOPICS = originalCatalogLimit;
   rmSync(sandbox, { recursive: true, force: true });
 });
 
@@ -161,6 +172,14 @@ async function joinTopic(topic: string, action: "open" | "post" = "post"): Promi
   await fire("tool_result", {
     tool: "board",
     input: { action, topic },
+    result: { ok: true },
+  }, runtimeContext(1_000_000));
+}
+
+async function participate(topic: string, mode: "join" | "watch" | "defer", reason = "test"): Promise<void> {
+  await fire("tool_result", {
+    tool: "board",
+    input: { action: "participate", topic, mode, reason },
     result: { ok: true },
   }, runtimeContext(1_000_000));
 }
@@ -409,8 +428,8 @@ test("相同来源不重复追加；Board 变化只追加 seq delta", async () =
 });
 
 test("并发 before_agent_start 以本次 ctx 关联 Board/CRITICAL，不串用 session 单槽", async () => {
-  assert.equal(handlers.before_agent_start.length, 3);
-  const [plan, deliverBoard, deliverCritical] = handlers.before_agent_start;
+  assert.equal(handlers.before_agent_start.length, 4);
+  const [plan, _deliverCatalog, deliverBoard, deliverCritical] = handlers.before_agent_start;
   const ctxA = runtimeContext(1_000_000);
   const ctxB = runtimeContext(1_000_000);
 
@@ -475,6 +494,62 @@ test("CRITICAL 可见消息不推进被动 Board cursor", () => {
     },
   ]);
   assert.equal(coverage.topicSeqs["complete-context"], 14);
+});
+
+test("catalog 首轮 checkpoint、后续仅追加变更 row；旧 catalog metadata 缺失时安全回退 checkpoint", async () => {
+  const historical = contextEntries;
+  const seed = "catalog-delta-seed";
+  contextEntries = [];
+  board.openTopic(seed, "catalog delta baseline");
+  try {
+    const first = await startTurn("catalog initial baseline");
+    const firstCatalog = messageOf(first, "pi-harness-board-catalog");
+    assert.ok(firstCatalog);
+    assert.equal(firstCatalog.details.mode, "checkpoint");
+
+    board.postNote(seed, "peer", "CATALOG-DELTA-ONLY");
+    const changed = await startTurn("catalog one topic changes");
+    const delta = messageOf(changed, "pi-harness-board-catalog");
+    assert.ok(delta);
+    assert.equal(delta.details.mode, "delta");
+    assert.match(delta.content, /catalog-delta-seed/);
+    assert.match(delta.content, /createdBy=/);
+    assert.match(delta.content, /createdAt=/);
+    assert.match(delta.content, /activity=/);
+    assert.doesNotMatch(delta.content, /complete-context/);
+
+    const prior = contextEntries;
+    contextEntries = prior.filter(entry => entry.customType !== "pi-harness-board-catalog");
+    const rebuilt = await startTurn("catalog checkpoint compacted away");
+    const checkpoint = messageOf(rebuilt, "pi-harness-board-catalog");
+    assert.ok(checkpoint);
+    assert.equal(checkpoint.details.mode, "checkpoint");
+    assert.match(checkpoint.content, /complete-context/);
+    assert.match(checkpoint.content, /catalog-delta-seed/);
+  } finally {
+    contextEntries = historical;
+    board.closeTopic(seed);
+  }
+});
+
+test("catalog row cap fail-loud，不投递静默截断的部分 catalog", async () => {
+  const topic = "catalog-cap-topic";
+  board.openTopic(topic, "catalog cap fixture");
+  const previous = process.env.PI_BOARD_CATALOG_MAX_TOPICS;
+  process.env.PI_BOARD_CATALOG_MAX_TOPICS = "1";
+  const errors: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: any[]) => errors.push(args.join(" "));
+  try {
+    const results = await startTurn("catalog over explicit cap");
+    assert.equal(messageOf(results, "pi-harness-board-catalog"), undefined);
+    assert.ok(errors.some(line => line.includes("Board delivery notice")));
+  } finally {
+    console.error = originalError;
+    if (previous === undefined) delete process.env.PI_BOARD_CATALOG_MAX_TOPICS;
+    else process.env.PI_BOARD_CATALOG_MAX_TOPICS = previous;
+    board.closeTopic(topic);
+  }
 });
 
 test("open topic 正文损坏时延后首次 checkpoint，不声明空 Board", () => {
@@ -631,10 +706,10 @@ test("branch 只保留 checkpoint 时，缺失的 CRITICAL 正文会重显", asy
   assert.match(critical.content, /CRITICAL-ONLY-UPDATE/);
 });
 
-test("失败的 Board open/post result 不直接登记 join；下一轮仍由共享目录发现", async () => {
+test("失败的 Board mutation 保持 catalog-only，不伪造 join", async () => {
   const topic = "failed-board-join";
   board.openTopic(topic, "failed mutations are not participation evidence");
-  board.postNote(topic, "peer", "FAILED-RESULT-BUT-PEER-TOPIC-VISIBLE");
+  board.postNote(topic, "peer", "FAILED-RESULT-MUST-STAY-METADATA-ONLY");
   const entriesBeforeResult = sessionEntries.length;
   await fire("tool_result", {
     tool: "board",
@@ -644,37 +719,50 @@ test("失败的 Board open/post result 不直接登记 join；下一轮仍由共
   assert.equal(sessionEntries.length, entriesBeforeResult, "failed mutation must not directly persist participation");
 
   const results = await startTurn("failed Board mutation");
-  const delta = messageOf(results, "pi-harness-board-delta");
-  assert.ok(delta);
-  assert.match(delta.content, /FAILED-RESULT-BUT-PEER-TOPIC-VISIBLE/);
-  assert.ok(sessionEntries.some(entry => (
-    entry.type === "pi-harness-board-participation"
-      && entry.data.action === "join"
-      && entry.data.topic === topic
-      && entry.data.reason === "open-topic-discovery"
-  )));
+  const catalog = messageOf(results, "pi-harness-board-catalog");
+  assert.ok(catalog);
+  assert.match(catalog.content, /failed-board-join/);
+  assert.doesNotMatch(catalog.content, /FAILED-RESULT-MUST-STAY-METADATA-ONLY/);
+  assert.equal(messageOf(results, "pi-harness-board-delta"), undefined);
   board.closeTopic(topic);
 });
 
-test("peer 在 session 启动后新建 topic，当前 agent 无需 board read/post 即在下一轮收到", async () => {
+test("watch/defer 只看 metadata；peer 后开 topic 先 catalog 可见，显式 join 后才接收完整正文和 delta", async () => {
+  board.openTopic("watch-topic", "Watch must remain metadata-only");
+  board.postNote("watch-topic", "other-agent", "WATCH-BODY-MUST-NOT-LEAK", { priority: "critical" });
+  await participate("watch-topic", "watch", "potential dependency");
+  const watched = await startTurn("watch peer topic");
+  const watchCatalog = messageOf(watched, "pi-harness-board-catalog");
+  assert.match(watchCatalog.content, /watch-topic/);
+  assert.match(watchCatalog.content, /critical=1/);
+  assert.doesNotMatch(watchCatalog.content, /WATCH-BODY-MUST-NOT-LEAK/);
+  assert.equal(messageOf(watched, "pi-harness-board-critical"), undefined);
+  await participate("watch-topic", "defer", "not currently relevant");
+  board.postNote("watch-topic", "other-agent", "DEFER-BODY-MUST-NOT-LEAK");
+  const deferred = await startTurn("defer peer topic");
+  const deferCatalog = messageOf(deferred, "pi-harness-board-catalog");
+  assert.match(deferCatalog.content, /watch-topic \[defer;/);
+  assert.doesNotMatch(deferCatalog.content, /DEFER-BODY-MUST-NOT-LEAK/);
+
   board.openTopic("cross-agent-topic", "Cross-agent synchronization");
   board.postNote("cross-agent-topic", "other-agent", "CROSS-AGENT-FIRST-NOTE");
 
   const discovered = await startTurn("discover peer-created topic");
-  const opened = messageOf(discovered, "pi-harness-board-delta");
+  const catalog = messageOf(discovered, "pi-harness-board-catalog");
+  assert.ok(catalog);
+  assert.match(catalog.content, /cross-agent-topic/);
+  assert.doesNotMatch(catalog.content, /CROSS-AGENT-FIRST-NOTE/);
+  assert.equal(messageOf(discovered, "pi-harness-board-delta"), undefined);
+
+  await participate("cross-agent-topic", "join", "same acceptance criterion");
+  const joined = await startTurn("join peer topic");
+  const opened = messageOf(joined, "pi-harness-board-delta");
   assert.ok(opened);
   assert.match(opened.content, /topic_opened/);
-  assert.match(opened.content, /cross-agent-topic/);
   assert.match(opened.content, /CROSS-AGENT-FIRST-NOTE/);
-  assert.ok(sessionEntries.some(entry => (
-    entry.type === "pi-harness-board-participation"
-      && entry.data.action === "join"
-      && entry.data.topic === "cross-agent-topic"
-      && entry.data.reason === "open-topic-discovery"
-  )));
 
   board.postNote("cross-agent-topic", "other-agent", "CROSS-AGENT-SECOND-NOTE");
-  const updated = await startTurn("observe peer update");
+  const updated = await startTurn("observe joined peer update");
   const delta = messageOf(updated, "pi-harness-board-delta");
   assert.ok(delta);
   assert.match(delta.content, /CROSS-AGENT-SECOND-NOTE/);
@@ -763,6 +851,7 @@ test("同进程另一 session 启动不会清掉当前 session 的已参与 topi
   await fire("session_start", {}, ctxA);
   board.openTopic(topic, "prove session-local Board feed state");
   board.postNote(topic, "peer", "SESSION-A-OPEN-NOTE");
+  await fire("tool_result", { tool: "board", input: { action: "participate", topic, mode: "join" }, result: { ok: true } }, ctxA);
   persist(entriesA, await fire(
     "before_agent_start",
     { prompt: "A observes open topic", systemPrompt: "system" },
@@ -867,14 +956,11 @@ test("Board listing 失败时延后同步，不把仍开放 topic 误判为关�
   }
 });
 
-test("startup participation 初始化失败后，单个 join 不会阻止全量基线重试", async () => {
+test("catalog 初始化失败后，修复后 explicit join 不会丢失新 topic", async () => {
   const preservedEntries = contextEntries;
-  const healthy = "init-retry-healthy";
   const joined = "init-retry-joined";
   const broken = "init-retry-broken";
-  board.openTopic(healthy, "must join after initialization retry");
-  board.postNote(healthy, "peer", "HEALTHY-BASELINE-MUST-APPEAR");
-  board.openTopic(joined, "explicit join while initialization is incomplete");
+  board.openTopic(joined, "explicit join after catalog retry");
   board.openTopic(broken, "temporarily malformed startup fixture");
   const brokenPath = join(projectDir, ".pi-board", "topics", `${broken}.jsonl`);
   const originalBroken = readFileSync(brokenPath, "utf-8");
@@ -886,15 +972,14 @@ test("startup participation 初始化失败后，单个 join 不会阻止全量�
     writeFileSync(brokenPath, originalBroken, "utf-8");
 
     board.postNote(joined, "current-agent", "EXPLICIT-JOIN-MUST-APPEAR");
-    await joinTopic(joined);
-    const results = await startTurn("retry incomplete participation initialization");
+    await participate(joined, "join", "after catalog recovery");
+    const results = await startTurn("retry catalog initialization");
     const checkpoint = messageOf(results, "pi-harness-board-checkpoint");
     assert.ok(checkpoint);
-    assert.match(checkpoint.content, /HEALTHY-BASELINE-MUST-APPEAR/);
     assert.match(checkpoint.content, /EXPLICIT-JOIN-MUST-APPEAR/);
   } finally {
     writeFileSync(brokenPath, originalBroken, "utf-8");
-    for (const topic of [healthy, joined, broken]) {
+    for (const topic of [joined, broken]) {
       if (board.listOpenTopics().some(open => open.id === topic)) board.closeTopic(topic);
     }
     contextEntries = preservedEntries;

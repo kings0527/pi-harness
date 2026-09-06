@@ -1,0 +1,8 @@
+# ADR-0030: Explicit context budget ladder for Board feeds
+Background: unbounded goal/note text flowed verbatim into the catalog, checkpoint/delta headers, CRITICAL messages, and tool echoes; one 10MB goal produced ~15MB catalog injections and a 290%-of-window context blowout (2026-09-05).
+Decision: every automatic Board injection path is byte-bounded after XML escaping — goal/topic/author/list-item excerpts, catalog checkpoint/delta (PI_BOARD_CATALOG_MAX_BYTES=64000), checkpoint/delta (PI_BOARD_REFERENCE_MAX_BYTES=65536), CRITICAL (PI_BOARD_CRITICAL_MAX_BYTES=65536), and single note bodies (PI_BOARD_INLINE_NOTE_MAX_BYTES=32768).
+Decision: an over-budget aggregate becomes one explicit sha256-bearing retrieval marker; its source JSONL/archive stays readable through `board action=read`. This is visible bounded delivery, not silent loss under ADR-0012.
+Decision: catalog sends one complete checkpoint then metadata row deltas/tombstones; retained delta metadata reconstructs state, while legacy catalog messages lacking metadata force one safe new checkpoint after compaction.
+Decision: caps live only at rendering/event projection, never read validators; old oversized Board/goal files remain exact and recoverable. Synthetic /goal echo identifies `/goal status` as the full-objective route. Events record byte length+digest, not duplicate free text.
+Reason: context capacity is a hard runtime invariant; escaped output and accumulated references, not raw fields alone, are what consume it.
+Rejected: silent truncation, deleting source evidence, imposing caps inside read paths, or per-turn relevance scoring.

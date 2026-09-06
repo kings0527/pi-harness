@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { assessContextSize } from "../core/context-size/index.ts";
 import { appendEvent } from "../core/events/index.ts";
+import { boundedExcerpt, boundedIntEnv } from "../core/text-budget/index.ts";
 import {
   beginGoalTurnOnce,
   clearGoal,
@@ -152,7 +153,14 @@ export default async function goalExtension(pi: ExtensionAPI) {
       if (!ctx.isIdle()) await ctx.waitForIdle();
       const latest = getGoal(id);
       if (latest?.id === goal.id && latest.status === "active") {
-        const echoedPrompt = `/goal ${trimmed}`;
+        // Slash commands are otherwise absent from the transcript. Do not
+        // re-inject an unbounded objective as a synthetic user message: the
+        // persistent active_goal reference is authoritative and is itself
+        // explicitly bounded with a retrieval path.
+        const echoedObjective = boundedExcerpt(trimmed, boundedIntEnv("PI_GOAL_ECHO_TEXT_BYTES", 1024));
+        const echoedPrompt = echoedObjective === trimmed
+          ? `/goal ${echoedObjective}`
+          : `/goal ${echoedObjective}\n[full objective remains available via /goal status]`;
         // The re-submitted command itself is a user turn; its first
         // before_agent_start must not double-count as goal work.
         registerEchoPrompt(id, latest.id, echoedPrompt);
