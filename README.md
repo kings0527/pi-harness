@@ -155,6 +155,7 @@ npm run test        # node --test tests/**/*.test.ts
 ## 外部来源与致谢 (Attribution)
 
 - `skills/mattpocock/` — 来自 [Matt Pocock](https://github.com/mattpocock) 的 skills 集合（code-review / diagnosing-bugs / domain-modeling / implement / prototype / research / resolving-merge-conflicts / tdd / to-spec / writing-great-skills），用于补齐工程流程类 skill。
+- 部分 security/reversing skills 包含来自 [Trail of Bits](https://www.trailofbits.com) 与 yaklang hack-skills 社区的材料，其许可文本完整保留于 `skills/LICENSE.trailofbits-skills`（CC BY-SA 4.0）与 `skills/LICENSE.yaklang-hack-skills`（MIT）。
 - 其余 skills、core、extensions、prompts、agents 均为本项目原创。
 
 ## License
