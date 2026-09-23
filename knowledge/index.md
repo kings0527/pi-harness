@@ -5,3 +5,4 @@ harness/board-multi-instance-collaboration-audit.md | 同目录多 PI 实例的 
 harness/board-collaboration-remediation-second-order-audit.md | Board/topic 整改方向确为优化，但防负优化需补 P0 可见性、P1 身份兼容、P2 fencing 与确定恢复三组硬边界
 harness/board-collaboration-remediation-implementation.md | ADR-0029 Board 协作整改实现：catalog participation、actor claim graph 与可恢复锁/close 事务
 harness/board-collaboration-remediation-implementation-audit.md | ADR-0029 实现有真实优化，但 lock/close/gate/catalog/participation 五类缺口使其暂不宜提交
+harness/git-history-scrub-before-opensource.md | Git 仓库开源前审计与 git-filter-repo 全历史清洗的完整流程、命中模式与验证方法
