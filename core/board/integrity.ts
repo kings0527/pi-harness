@@ -1,6 +1,6 @@
 // ADR-0020: Board integrity audit — detect append-only JSONL corruption.
 //
-// Failure modes from the sibling-project incident (Git conflict rolled back a closed
+// Failure modes from a real-world incident (Git conflict rolled back a closed
 // topic's archive JSONL; notes #31–#35 survived only in summary.md):
 //   1. Mid-file rollback / gap: note seq stops being strictly 1,2,3,…,N.
 //   2. Tail truncation: JSONL ends at #30 while close-time summary.md still

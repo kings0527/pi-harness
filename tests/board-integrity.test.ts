@@ -2,7 +2,7 @@
 // Core contract:
 // - Live topic JSONL with a seq gap/rollback → readNotes/postNote fail loud.
 // - Archived topic whose summary cites notes beyond the JSONL max seq
-//   (Git-conflict tail truncation, sibling-project #31–#35 incident) → readArchivedTopic
+//   (Git-conflict tail truncation, notes #31–#35 incident) → readArchivedTopic
 //   and listTopics fail loud.
 // - Intact archive → reads pass; goal prose with unrelated #numbers → no false alarm.
 // - Legacy archive without summary.md → degrades to seq-continuity only, no false alarm.
@@ -100,7 +100,7 @@ test("活 topic seq 回滚时 readNotes/postNote fail-loud", () => {
   rmSync(join(workDir, ".pi-board", "topics", "t-live-rollback.board.md"), { force: true });
 });
 
-test("归档尾部截断被 summary 对端校验抓出（sibling-project #31–#35 事故）", () => {
+test("归档尾部截断被 summary 对端校验抓出（#31–#35 事故）", () => {
   board.openTopic("t-tail-truncated", "verify tail truncation detection");
   for (let i = 1; i <= 8; i += 1) {
     board.postNote("t-tail-truncated", "worker", `finding-${i}`);
@@ -230,14 +230,14 @@ test("P1 回归：Note 正文含其他 topic 的 - [#999] 引用不误报", () =
   assert.ok(board.listTopics().some(t => t.id === "t-cross-topic-cite"));
 });
 
-test("META 损坏与尾部截断同时发生时两个 issue 都报（真实 sibling-project 样本）", () => {
+test("META 损坏与尾部截断同时发生时两个 issue 都报（真实事故样本）", () => {
   board.openTopic("t-meta-and-tail", "verify combined damage reporting");
   for (let i = 1; i <= 4; i += 1) {
     board.postNote("t-meta-and-tail", "worker", `finding-${i}`);
   }
   board.closeTopic("t-meta-and-tail");
 
-  // Rollback shape from the sibling-project incident: META reverted to open AND the
+  // Rollback shape from the real incident: META reverted to open AND the
   // tail cut — the audit must report both, not stop at the first.
   const path = archiveJsonlPath("t-meta-and-tail");
   const lines = readFileSync(path, "utf-8").split("\n").filter(l => l.trim());

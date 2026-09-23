@@ -17,7 +17,7 @@ description: >-
 ## 0. THE ONLY THING AN AGENT NEEDS
 
 ```bash
-S=<this-skill-dir>/scripts     # e.g. /home/me/git/pi-harness/skills/ida-mcp/scripts
+S=<this-skill-dir>/scripts     # e.g. /path/to/pi-harness/skills/ida-mcp/scripts
 
 # Analyze ANY binary — the daemon auto-starts on this first call (~1s for .i64):
 python3 $S/ida.py lookup_funcs --queries sign      --binary /path/to/app

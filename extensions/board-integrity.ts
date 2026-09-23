@@ -1,6 +1,6 @@
 // ADR-0020: Board integrity runtime hook — Git-tracking warning ONLY.
 //
-// Why: sibling-project's .pi-board/ was tracked by Git; a conflict merge rolled back a
+// Why: a sibling project's .pi-board/ was tracked by Git; a conflict merge rolled back a
 // closed topic's archive JSONL (notes #31–#35 lost; only summary/decisions
 // survived). Append-only files assume one writer per file; Git last-write-wins
 // silently violates that invariant across machines.

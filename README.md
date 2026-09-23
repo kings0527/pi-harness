@@ -1,5 +1,7 @@
 # pi-harness
 
+> **pi-harness** is a [pi](https://github.com/earendil-works) extension package that gives a coding agent a shared cognitive layer: autonomous multi-agent collaboration (Board / spawn / storm / physarum), tiered long-term knowledge, and runtime-enforced engineering discipline. The core is runtime-agnostic TypeScript — it can migrate to other runtimes.
+
 > Agent 的共享认知层——安装一个包，获得完整的多 agent 协作 + 长期记忆 + 工程纪律体系。
 
 pi-harness 是一个 [pi](https://github.com/earendil-works) 扩展包。装上它，agent 就具备了自主发起多 agent 协作、把结论沉淀成长期知识、以及一套由 runtime 强制的工程纪律。核心逻辑运行时无关，未来可迁移到其它 runtime。
@@ -150,6 +152,11 @@ npm run typecheck   # tsc --noEmit
 npm run test        # node --test tests/**/*.test.ts
 ```
 
+## 外部来源与致谢 (Attribution)
+
+- `skills/mattpocock/` — 来自 [Matt Pocock](https://github.com/mattpocock) 的 skills 集合（code-review / diagnosing-bugs / domain-modeling / implement / prototype / research / resolving-merge-conflicts / tdd / to-spec / writing-great-skills），用于补齐工程流程类 skill。
+- 其余 skills、core、extensions、prompts、agents 均为本项目原创。
+
 ## License
 
-Private — personal toolbox for kk.
+[MIT](./LICENSE) © kings0527
