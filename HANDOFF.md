@@ -45,7 +45,7 @@ pi runtime（agent loop、工具、会话）
 
 ### 1.4 项目背景（为什么是 pi，不是旧 harness）
 
-用户曾维护一个 Rust 多 Agent harness（`/home/me/harness/harness-mvp/harness-core`，核心文件 orchestrator.rs 约 2.4 万行），实现了 Orchestrator 调度、scope 频道、broadcast、caucus 多轮协商（曾成功用于狼人杀游戏多 agent 达成共识）。评估后决定**不再在旧 harness 上加功能**：其单 agent 引擎部分是重复造轮子，2.4 万行 orchestrator 维护成本过高。新方案：以 **pi coding agent**（Mario Zechner 的极简 coding agent，仓库已迁移至 https://github.com/earendil-works/pi ）为"发动机/底盘"，只在其 extension/package 体系上重建差异化能力。
+用户曾维护一个 Rust 多 Agent harness（`~/harness-mvp/harness-core`，核心文件 orchestrator.rs 约 2.4 万行），实现了 Orchestrator 调度、scope 频道、broadcast、caucus 多轮协商（曾成功用于狼人杀游戏多 agent 达成共识）。评估后决定**不再在旧 harness 上加功能**：其单 agent 引擎部分是重复造轮子，2.4 万行 orchestrator 维护成本过高。新方案：以 **pi coding agent**（Mario Zechner 的极简 coding agent，仓库已迁移至 https://github.com/earendil-works/pi ）为"发动机/底盘"，只在其 extension/package 体系上重建差异化能力。
 
 pi 已在本机安装完成（详见 §2.1 本机环境事实）。
 
@@ -66,7 +66,7 @@ pi 已在本机安装完成（详见 §2.1 本机环境事实）。
 | 项 | 值 |
 |---|---|
 | pi 版本 | **0.83.0** |
-| pi 二进制位置 | `/home/me/.npm-global/bin/pi` |
+| pi 二进制位置 | `~/.npm-global/bin/pi` |
 | 全局配置 | `~/.pi/agent/settings.json` |
 | 已装包 | **零**（干净环境，pi-harness 将是第一个） |
 
