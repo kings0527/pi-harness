@@ -10,6 +10,7 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { appendEvent } from "../events/index.ts";
+import { scopedProjectRoot } from "../runtime/root.ts";
 
 // Lifecycle of an index row. `active` is the implicit default so every legacy
 // row (no tag) keeps its current meaning. Retired rows stay in the file for
@@ -49,7 +50,8 @@ function assertScope(scope: KnowledgeScope): void {
 
 /** The project boundary is the pi session root; never promote it to a Git ancestor. */
 export function getProjectRoot(startDir: string = process.cwd()): string {
-  return resolve(startDir);
+  // Explicit scope wins; otherwise this is exactly resolve(cwd) as before.
+  return resolve(scopedProjectRoot() ?? startDir);
 }
 
 /** Resolve the containing Git workspace; non-Git sessions share their project root. */
