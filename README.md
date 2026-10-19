@@ -161,3 +161,32 @@ npm run test        # node --test tests/**/*.test.ts
 ## License
 
 [MIT](./LICENSE) © kings0527
+
+## Using pi-harness from DeepSeek Harness (dsh)
+
+The dsh adapter lives in its own repository:
+[dsh-pi-harness](https://github.com/kings0527/dsh-pi-harness). It bundles
+`core/dsh.ts` from this repo into `dist/core.js` and exposes the Board, the
+tiered knowledge base, handoffs, and the always-on doctrine to the DeepSeek
+Harness host — the same `.pi-board/`, `knowledge/`, and `handoff/` files that
+`pi` reads and writes, so one project directory can be opened by either harness.
+
+```bash
+git clone https://github.com/kings0527/dsh-pi-harness
+# then, in the dsh profile that should have it:
+pnpm add -w "file:$HOME/git/dsh-pi-harness"
+#   cordis.patch.yml:
+#     - insert:
+#         - id: pi-harness
+#           name: "@local/dsh-pi-harness"
+```
+
+Rebuild `dist/core.js` after changing anything in `core/`:
+
+```bash
+bun build core/dsh.ts --outfile ../dsh-pi-harness/dist/core.js --format esm --target node
+```
+
+`core/runtime/root.ts` exists for that host: one dsh process serves several
+projects, so it pins the project root per operation instead of anchoring on
+`process.cwd()`. Unset (as under `pi`), every path keeps its original behavior.
