@@ -102,9 +102,11 @@ bash $S/setup.sh env               # prints IDADIR export if you want it persist
 Env overrides (rarely needed): `IDA_MCP_URL`, `IDA_MCP_DAEMON_PORT` (default 8765),
 `IDA_MCP_PYTHON`, `IDADIR`, `IDA_MCP_READY_TIMEOUT` (default 300s), `IDA_OUT`.
 
-> **This machine (verified):** IDA at `/Applications/iaa.app/Contents/MacOS`;
-> `idapro` importable; headless auto-start ready. `ida.py --binary <x>` spins up a
-> daemon in ~1s and answers real tool calls.
+> **Linux / WSL2 headless notes:** Point `IDADIR` (or install under `/opt/idapro` / `~/ida-pro`),
+> accept the EULA once so `~/.idapro/*.hexlic` is active, and ensure `idapro` + `ida_pro_mcp` are importable.
+> Requires **ida-pro-mcp v2** (`pip install git+https://github.com/mrexodia/ida-pro-mcp`)
+> — PyPI 1.4.0 only serves SSE and does not speak the `/mcp` JSON-RPC protocol.
+> `ida.py --binary <x>` spins up a daemon on demand and answers real tool calls.
 
 ## 4. TOOL REFERENCE (ida-pro-mcp v2)
 
@@ -198,6 +200,9 @@ IDA_OUT=./out python3 $S/ida.py --decompile-file funcs.txt --binary $B   # name=
   via `idalib_open`. `--stop` when you're truly done to free memory.
 - **`--status` is your debugger** — it lists the managed daemon, every live server,
   and which binary each has loaded. `--health` checks the environment.
+- **Headless worker self-exits when idle** (v2 `idle_ttl_sec`, upstream default 600s;
+  `ida.py` passes 24h when it (re)activates a binary via `idb_open`). If the daemon is
+  gone, the next `--binary` call transparently spawns a fresh one.
 - **Large outputs**: prefer `--decompile*` batch-to-file and read files, rather than
   dumping big pseudocode into the conversation.
 - **`py_eval` is the universal fallback** for anything not covered by a typed tool

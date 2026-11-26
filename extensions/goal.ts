@@ -1,3 +1,4 @@
+import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { assessContextSize } from "../core/context-size/index.ts";
 import { appendEvent } from "../core/events/index.ts";
@@ -173,6 +174,89 @@ export default async function goalExtension(pi: ExtensionAPI) {
         .map(command => ({ label: command, value: command }));
     },
   });
+
+  // Expose the same session-persistent goal primitive as an LLM-callable tool
+  // so natural-language requests can activate autonomous goal tracking directly.
+  if (typeof pi.registerTool === "function") {
+    pi.registerTool({
+      name: "goal",
+      label: "Session Goal",
+      description: "Manage a session-persistent execution goal (set, status, pause, resume, clear).",
+      parameters: Type.Object({
+        action: Type.Union([
+          Type.Literal("set"),
+          Type.Literal("status"),
+          Type.Literal("pause"),
+          Type.Literal("resume"),
+          Type.Literal("clear"),
+        ]),
+        objective: Type.Optional(Type.String({ description: "Goal completion condition (for set)" })),
+      }),
+      async execute(_toolCallId: string, params: any, _signal: any, _onUpdate: any, ctx: any) {
+        if (process.env.PI_FIELD_ACTOR?.trim()) {
+          return {
+            content: [{ type: "text" as const, text: "Spawned Live Field tentacles do not manage session goals; emit pulses via the field tool." }],
+          };
+        }
+        const id = sessionId(ctx);
+        switch (params.action) {
+          case "status": {
+            const current = getGoal(id);
+            if (!current) {
+              return { content: [{ type: "text" as const, text: "No goal active in this session." }] };
+            }
+            const evidence = current.evidence
+              ? `\nEvidence: Board ${current.evidence.topic}#${current.evidence.noteSeq}`
+              : "";
+            return {
+              content: [{
+                type: "text" as const,
+                text: `Goal: ${current.text}\nStatus: ${current.status}\nID: ${current.id}\nCompletion tags: ${GOAL_MET_TAG}, ${goalEvidenceTag(current.id)}${evidence}`,
+              }],
+            };
+          }
+          case "set": {
+            const objective = String(params.objective ?? "").trim();
+            if (!objective) {
+              return { content: [{ type: "text" as const, text: "Error: objective is required for goal action=set." }] };
+            }
+            const created = setGoal(id, objective);
+            autoContinuations.set(id, 0);
+            notify(ctx, `Goal set: ${created.text}`);
+            return {
+              content: [{
+                type: "text" as const,
+                text: `Session goal active (${created.id}): ${created.text}\nAuto-continuation is active until achieved, paused, or cleared.\nWhen verified complete, post a Board note with tags: ["${GOAL_MET_TAG}", "${goalEvidenceTag(created.id)}"].`,
+              }],
+            };
+          }
+          case "pause": {
+            const paused = pauseGoal(id);
+            if (paused) notify(ctx, `Goal paused: ${paused.text}`);
+            return {
+              content: [{ type: "text" as const, text: paused ? `Goal paused (${paused.id}): ${paused.text}` : "No active goal to pause." }],
+            };
+          }
+          case "resume": {
+            const resumed = resumeGoal(id);
+            if (resumed) notify(ctx, `Goal resumed: ${resumed.text}`);
+            return {
+              content: [{ type: "text" as const, text: resumed ? `Goal resumed (${resumed.id}): ${resumed.text}` : "No paused goal to resume." }],
+            };
+          }
+          case "clear": {
+            const cleared = clearGoal(id);
+            if (cleared) notify(ctx, `Goal cleared: ${cleared.text}`);
+            return {
+              content: [{ type: "text" as const, text: cleared ? `Goal cleared (${cleared.id}): ${cleared.text}` : "No goal to clear." }],
+            };
+          }
+          default:
+            return { content: [{ type: "text" as const, text: `Error: unknown goal action "${params.action}"` }] };
+        }
+      },
+    });
+  }
 
   // Persist only state changes. Rewriting/moving an ephemeral goal message would
   // cut the provider cache prefix at the previous user turn (ADR-0016).

@@ -63,6 +63,8 @@ When current level fails, ALWAYS escalate to the next level. Never skip levels u
 │ • Dynamic failed? → Switch to emulation (offline, no detect)│
 │ • Emulation failed? → Switch to pure static analysis        │
 │ • Static unreadable? → Switch to trace-based (Stalker/trace)│
+│ • Or dispatch `flux` to probe static + emulation + dynamic  │
+│   angles concurrently over a shared Live Field              │
 │ • Reload re-router to pick fundamentally different path     │
 ├─────────────────────────────────────────────────────────────┤
 │ L5: REDUCE SCOPE / ACCEPT PARTIAL                           │

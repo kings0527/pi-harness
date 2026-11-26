@@ -3,9 +3,33 @@ import { Type } from "typebox";
 import { listProfiles, loadProfile } from "../core/identity/index.ts";
 import { spawnAgent, spawnAgents } from "../core/spawn/index.ts";
 import type { SpawnOptions } from "../core/spawn/index.ts";
-import { listTopics, openTopic, postNote, readNotes, closeTopic } from "../core/board/index.ts";
+import { hasArchivedTopic, listTopics, openTopic, postNote } from "../core/board/index.ts";
 import { getStormConfig } from "../core/storm/index.ts";
-import { getPhysarumConfig } from "../core/physarum/index.ts";
+import {
+  getFluxConfig,
+  isFluxDisabled,
+  pickStartingLenses,
+  resolveFluxModels,
+} from "../core/flux/index.ts";
+import {
+  artifactsDir,
+  buildCollectiveBoardSummary,
+  closeField,
+  getFieldMeta,
+  listPresences,
+  listResources,
+  openField,
+  readPulses,
+  resolveFieldStorageRoot,
+  type FieldMode,
+  type TentacleOutcome,
+} from "../core/field/index.ts";
+import {
+  createTentacleWorktree,
+  inspectWorktreeChanges,
+  removeTentacleWorktree,
+  type TentacleWorktree,
+} from "../core/field/worktree.ts";
 import { assessContextSize } from "../core/context-size/index.ts";
 import { appendEvent } from "../core/events/index.ts";
 
@@ -28,13 +52,13 @@ export default async function(pi: any) {
   pi.registerTool({
     name: "spawn",
     label: "Spawn Subagents",
-    description: "Spawn Board collaborators. Actions: list, run, debate, physarum.",
+    description: "Spawn Board collaborators. Actions: list, run, debate, flux.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("list"),
         Type.Literal("run"),
         Type.Literal("debate"),
-        Type.Literal("physarum"),
+        Type.Literal("flux"),
       ]),
       topic: Type.Optional(Type.String({ description: "Open Board topic" })),
       agents: Type.Optional(Type.Array(Type.Object({
@@ -42,8 +66,12 @@ export default async function(pi: any) {
         task: Type.String({ description: "Concrete task" }),
       }), { description: "Parallel agents" })),
       question: Type.Optional(Type.String({ description: "Debate/exploration question" })),
-      angles: Type.Optional(Type.Array(Type.String(), { description: "Physarum angles" })),
-      timeoutMs: Type.Optional(Type.Integer({ description: "Timeout per agent" })),
+      angles: Type.Optional(Type.Array(Type.String(), { description: "Initial hints" })),
+      lenses: Type.Optional(Type.Array(Type.String(), { description: "Starting lenses" })),
+      models: Type.Optional(Type.Array(Type.String())),
+      mode: Type.Optional(Type.Union([Type.Literal("shared"), Type.Literal("worktree")])),
+      tentacles: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+      timeoutMs: Type.Optional(Type.Integer({ description: "Hard cap ms" })),
     }),
     async execute(toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) {
       try {
@@ -62,7 +90,6 @@ export default async function(pi: any) {
             if (!params.topic) throw new Error("topic is required for run");
             if (!params.agents?.length) throw new Error("agents is required for run");
 
-            // 校验 topic 存在且 open
             const topics = listTopics();
             const meta = topics.find((t: any) => t.id === params.topic);
             if (!meta) throw new Error(`Topic "${params.topic}" not found — open it with the board tool first`);
@@ -97,19 +124,15 @@ export default async function(pi: any) {
             if (!storm.enabled) throw new Error("Storm mode is disabled. Enable it with /storm on <model1>,<model2>");
             if (storm.models.length < 2) throw new Error("Storm requires at least 2 models. Configure with /storm on <model1>,<model2>");
 
-            // 校验 topic 存在且 open
             const debateTopics = listTopics();
             const debateMeta = debateTopics.find((t: any) => t.id === params.topic);
             if (!debateMeta) throw new Error(`Topic "${params.topic}" not found — open it with the board tool first`);
             if (debateMeta.status !== "open") throw new Error(`Topic "${params.topic}" is ${debateMeta.status}, not open`);
 
             const models = storm.models;
-
-            // 动态构建参与者列表
             const participants: SpawnOptions[] = [];
 
             if (models.length === 2) {
-              // 经典对抗：advocate vs critic
               const advocateProfile = loadProfile("advocate");
               const criticProfile = loadProfile("critic");
               participants.push({
@@ -129,7 +152,6 @@ export default async function(pi: any) {
                 ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
               });
             } else {
-              // N 个独立分析者：每个用自己的模型独立分析
               for (let i = 0; i < models.length; i++) {
                 participants.push({
                   profile: {
@@ -151,7 +173,6 @@ export default async function(pi: any) {
             const participantSummary = participants.map((p, i) => `${p.profile.name} (${models[i]})`).join(", ");
             onUpdate?.({ content: [{ type: "text" as const, text: `⚡ Storm debate: ${participants.length} participants [${participantSummary}] on: "${params.question}"` }] });
 
-            // 串行执行（回合制）——每个都能读到前面的论点
             const debateResults = [];
             for (let i = 0; i < participants.length; i++) {
               const result = await spawnAgent(participants[i]);
@@ -169,89 +190,208 @@ export default async function(pi: any) {
             warnIfLargeResult(debateText, ctx, "debate");
             return { content: [{ type: "text" as const, text: debateText }] };
           }
-          case "physarum": {
-            if (!params.topic) throw new Error("topic is required for physarum");
-            if (!params.question) throw new Error("question is required for physarum");
+          case "flux": {
+            if (!params.question?.trim()) throw new Error("question is required for flux");
 
-            const config = getPhysarumConfig();
-            if (!config.enabled) throw new Error("Physarum mode is disabled. Enable with /physarum on <models>");
-
-            // 校验主 topic open
-            const pTopics = listTopics();
-            const pMeta = pTopics.find((t: any) => t.id === params.topic);
-            if (!pMeta) throw new Error(`Topic "${params.topic}" not found`);
-            if (pMeta.status !== "open") throw new Error(`Topic "${params.topic}" is ${pMeta.status}, not open`);
-
-            const maxPulses = Math.min(config.maxPulses ?? 3, 5);
-            const tentacleCount = Math.min(config.tentacles ?? Math.max(config.models.length, 2), 6);
-
-            // 创建工作子 topic
-            const workingTopicId = `${params.topic}--physarum-${Date.now()}`;
-            openTopic(workingTopicId, params.question);
-
-            let actualPulses = 0;
-            try {
-              for (let pulse = 1; pulse <= maxPulses; pulse++) {
-                actualPulses = pulse;
-                const isFirstPulse = pulse === 1;
-                const isLastPulse = pulse === maxPulses;
-
-                // 构造 N 个 tentacle
-                const participants: SpawnOptions[] = [];
-                for (let i = 0; i < tentacleCount; i++) {
-                  const angle = params.angles?.[i];
-                  let taskBody: string;
-
-                  if (isLastPulse) {
-                    taskBody = `PULSE ${pulse}/${maxPulses} — SYNTHESIZE: Read the ENTIRE board. The collective has explored for ${pulse - 1} rounds. Now SYNTHESIZE: merge all findings into a coherent answer. Post your synthesis with priority="critical".\nQuestion: "${params.question}"`;
-                  } else if (isFirstPulse) {
-                    taskBody = `PULSE ${pulse}/${maxPulses} — DIVERGE: Explore this angle: "${angle || `pick a distinct direction after reading the board (you are tentacle ${i + 1} of ${tentacleCount})`}"\nQuestion: "${params.question}"`;
-                  } else {
-                    taskBody = `PULSE ${pulse}/${maxPulses} — BUILD & CONVERGE: Read the board. Build on the strongest leads from previous pulses. Deepen, refine, cross-pollinate. If your angle hit a dead end, pivot to reinforce a promising direction others found.\nQuestion: "${params.question}"`;
-                  }
-
-                  participants.push({
-                    profile: loadProfile("tentacle"),
-                    topic: workingTopicId,
-                    task: taskBody,
-                    cwd: process.cwd(),
-                    model: config.models[i % config.models.length],
-                    ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
-                  });
-                }
-
-                const phaseLabel = isFirstPulse ? "diverging" : isLastPulse ? "synthesizing" : "building & converging";
-                onUpdate?.({ content: [{ type: "text" as const, text: `🍄 Pulse ${pulse}/${maxPulses}: ${tentacleCount} tentacles ${phaseLabel}...` }] });
-
-                // 并行 spawn 本轮所有触角
-                const results = await spawnAgents(participants);
-
-                // 早停：所有输出都很短 → 自然收敛信号
-                if (!isFirstPulse && !isLastPulse) {
-                  const allBrief = results.every(r => (r.output?.length ?? 0) < 200);
-                  if (allBrief) {
-                    onUpdate?.({ content: [{ type: "text" as const, text: `📡 Pulse ${pulse}: all tentacles converged (brief outputs). Stopping early.` }] });
-                    break;
-                  }
-                }
-              }
-
-              // 从工作子 topic 提取综合结论（priority=critical 的 notes）
-              const allNotes = readNotes(workingTopicId);
-              const criticalNotes = allNotes.filter((n: any) => n.priority === "critical");
-              const synthesisContent = criticalNotes.length > 0
-                ? criticalNotes.map((n: any) => n.content).join("\n\n---\n\n")
-                : allNotes.map((n: any) => `${n.author}: ${n.content}`).join("\n\n");
-
-              // 将综合结论 post 到主 topic
-              postNote(params.topic, "physarum", synthesisContent, { tags: ["physarum-synthesis"] });
-
-            } finally {
-              // 归档工作子 topic（零副作用保证）
-              try { closeTopic(workingTopicId); } catch {}
+            const config = getFluxConfig();
+            if (isFluxDisabled(config)) {
+              throw new Error("Flux mode is disabled. Re-enable with /flux on");
             }
 
-            return { content: [{ type: "text" as const, text: `🌿 Physarum complete (${actualPulses} pulses, ${tentacleCount} tentacles). Collective synthesis posted to topic "${params.topic}".\n\nNow \`board read ${params.topic}\` to see the result, then consider \`board close\` → \`distill\`.` }] };
+            const activeModelId = String(ctx?.model?.id ?? "").trim();
+            const activeProvider = String(ctx?.model?.provider ?? "").trim();
+            const currentModelSpec = activeModelId
+              ? (activeProvider ? `${activeProvider}/${activeModelId}` : activeModelId)
+              : undefined;
+            const models = resolveFluxModels(config, currentModelSpec, params.models);
+
+            const sessionId = ctx?.sessionManager?.getSessionId?.();
+            const topicId = String(params.topic ?? "").trim() || `flux-${Date.now()}`;
+            const pTopics = listTopics();
+            const pMeta = pTopics.find((t: any) => t.id === topicId);
+            if (!pMeta) {
+              if (hasArchivedTopic(topicId)) {
+                throw new Error(`Topic "${topicId}" already exists in archive; pick a fresh topic ID`);
+              }
+              openTopic(topicId, params.question.trim(), {
+                ...(typeof sessionId === "string" && sessionId.trim()
+                  ? { actor: { id: sessionId } }
+                  : {}),
+              });
+            } else if (pMeta.status !== "open") {
+              throw new Error(`Topic "${topicId}" is ${pMeta.status}, not open`);
+            }
+
+            const mode: FieldMode = params.mode ?? config.mode ?? "shared";
+            const requestedCount = params.tentacles
+              ?? (Array.isArray(params.lenses) && params.lenses.length > 0 ? params.lenses.length : undefined)
+              ?? (Array.isArray(params.angles) && params.angles.length > 0 ? params.angles.length : undefined)
+              ?? config.tentacles
+              ?? Math.max(models.length, 3);
+            const tentacleCount = Math.min(Math.max(1, requestedCount), 8);
+            const lenses = pickStartingLenses(tentacleCount, params.lenses);
+
+            const rootCwd = ctx?.cwd ?? process.cwd();
+            const fieldStorageRoot = resolveFieldStorageRoot();
+            const fieldId = `${topicId}--field-${Date.now()}`;
+            openField(fieldId, params.question, {
+              topic: topicId,
+              mode,
+              rootCwd,
+              createdBy: "flux-coordinator",
+              storageRoot: fieldStorageRoot,
+            });
+            const sharedArtifacts = artifactsDir(fieldId, fieldStorageRoot);
+
+            const createdWorktrees: TentacleWorktree[] = [];
+            const participants: SpawnOptions[] = [];
+            const tentacleMeta: Array<{
+              label: string;
+              lens: string;
+              model?: string;
+              worktree?: TentacleWorktree;
+            }> = [];
+
+            try {
+              for (let i = 0; i < tentacleCount; i++) {
+                const lens = lenses[i];
+                const label = `t${i + 1}-${lens.id}`;
+                const actorId = `${fieldId}:${label}`;
+                const model = models.length > 0 ? models[i % models.length] : undefined;
+                const angleHint = params.angles?.[i]?.trim();
+
+                let tentacleCwd = rootCwd;
+                let wt: TentacleWorktree | undefined;
+                if (mode === "worktree") {
+                  wt = createTentacleWorktree(rootCwd, fieldId, label, fieldStorageRoot);
+                  createdWorktrees.push(wt);
+                  tentacleCwd = wt.path;
+                }
+
+                const taskLines = [
+                  `Question / Objective: "${params.question}"`,
+                  `Starting lens (${lens.name}): ${lens.startingBias}`,
+                  ...(angleHint ? [`Initial direction hint: ${angleHint}`] : []),
+                  ...(wt
+                    ? [`Workspace topology: isolated git worktree (${wt.path}) sharing the live cognitive field with peers.`]
+                    : [`Workspace topology: shared workspace (${rootCwd}). Use field action=claim/release before mutating exclusive shared resources.`]),
+                  `Stay in the environment feedback loop until you hit a verified breakthrough (emit kind="breach"), exhaust live leads across angles, or hit a concrete external block.`,
+                ];
+
+                participants.push({
+                  profile: loadProfile("tentacle"),
+                  topic: topicId,
+                  task: taskLines.join("\n"),
+                  cwd: tentacleCwd,
+                  ...(model ? { model } : {}),
+                  label,
+                  fieldId,
+                  actorId,
+                  fieldStorageRoot,
+                  lens: lens.id,
+                  lensGuidance: lens.startingBias,
+                  artifactsPath: sharedArtifacts,
+                  ...(signal ? { signal } : {}),
+                  env: {
+                    PI_FIELD_ID: fieldId,
+                    PI_FIELD_ROOT: fieldStorageRoot,
+                    PI_FIELD_ACTOR: label,
+                    PI_FIELD_ACTOR_ID: actorId,
+                    PI_FIELD_LENS: lens.id,
+                  },
+                  ...(params.timeoutMs && { timeoutMs: params.timeoutMs }),
+                });
+                tentacleMeta.push({ label, lens: lens.id, model, worktree: wt });
+              }
+
+              const lineup = tentacleMeta.map(t => `${t.label}[${t.model ?? "default"}]`).join(", ");
+              onUpdate?.({
+                content: [{
+                  type: "text" as const,
+                  text: `Live Flux field "${fieldId}" (${mode}): launching ${tentacleCount} concurrent tentacles [${lineup}]...`,
+                }],
+              });
+
+              const poll = setInterval(() => {
+                try {
+                  const live = listPresences(fieldId, { storageRoot: fieldStorageRoot });
+                  const pulses = readPulses(fieldId, undefined, fieldStorageRoot);
+                  const locks = listResources(fieldId, fieldStorageRoot);
+                  const meta = getFieldMeta(fieldId, fieldStorageRoot);
+                  const lockInfo = locks.length ? ` | locks: ${locks.map(l => `${l.resource}(${l.holderLabel})`).join(",")}` : "";
+                  const statusTag = meta?.status === "breached" ? " | BREACH!" : "";
+                  onUpdate?.({
+                    content: [{
+                      type: "text" as const,
+                      text: `Live field "${fieldId}": ${live.length} active | ${pulses.length} pulses${lockInfo}${statusTag}`,
+                    }],
+                  });
+                } catch {
+                  /* telemetry is best-effort */
+                }
+              }, 2500);
+              poll.unref?.();
+
+              let results;
+              try {
+                results = await spawnAgents(participants);
+              } finally {
+                clearInterval(poll);
+              }
+
+              const outcomes: TentacleOutcome[] = results.map((r, i) => {
+                const tm = tentacleMeta[i];
+                let worktreePath: string | undefined;
+                let worktreeDiffStat: string | undefined;
+                if (tm.worktree) {
+                  const diff = inspectWorktreeChanges(tm.worktree.path);
+                  if (diff.dirty) {
+                    worktreePath = tm.worktree.path;
+                    worktreeDiffStat = diff.summary;
+                  } else {
+                    removeTentacleWorktree(rootCwd, tm.worktree.path);
+                  }
+                }
+                return {
+                  label: tm.label,
+                  lens: tm.lens,
+                  model: tm.model,
+                  exitCode: r.exitCode,
+                  timedOut: r.timedOut,
+                  output: r.output,
+                  ...(worktreePath ? { worktreePath, worktreeDiffStat } : {}),
+                };
+              });
+
+              const finalMeta = getFieldMeta(fieldId, fieldStorageRoot);
+              const breached = Boolean(finalMeta?.breachSeq || finalMeta?.status === "breached");
+              closeField(fieldId, {
+                status: breached ? "breached" : "closed",
+                storageRoot: fieldStorageRoot,
+              });
+
+              const summary = buildCollectiveBoardSummary(fieldId, outcomes, fieldStorageRoot);
+              postNote(topicId, "flux", summary, {
+                tags: ["flux-synthesis"],
+                ...(typeof sessionId === "string" && sessionId.trim()
+                  ? { actor: { id: sessionId }, kind: "evidence" as const }
+                  : {}),
+              });
+
+              const pulseCount = readPulses(fieldId, undefined, fieldStorageRoot).length;
+              const statusNote = breached
+                ? `BREACH verified by ${finalMeta?.breachedBy ?? "tentacle"} (pulse #${finalMeta?.breachSeq ?? "?"})`
+                : "natural saturation";
+              const responseText = `Live Flux complete (${tentacleCount} tentacles, ${mode}, ${pulseCount} pulses, ${statusNote}).\nSingle-point structured digest posted to topic "${topicId}".\n\n${summary}\n\n---\nReview the collective echoes above, then verify/converge on "${topicId}" (or launch another targeted probe).`;
+              warnIfLargeResult(responseText, ctx, "flux");
+              return { content: [{ type: "text" as const, text: responseText }] };
+            } catch (err) {
+              for (const wt of createdWorktrees) {
+                removeTentacleWorktree(rootCwd, wt.path);
+              }
+              closeField(fieldId, { storageRoot: fieldStorageRoot });
+              throw err;
+            }
           }
           default:
             throw new Error(`Unknown action: ${params.action}`);

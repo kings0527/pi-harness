@@ -94,7 +94,7 @@ When target has multiple protection layers, follow this priority order:
 | 3rd | Obfuscation (CFF/VM/opaque predicates) | Deobfuscate OR work around via dynamic analysis |
 | 4th | Business logic / Algorithm | NOW analyze the actual target |
 
-**Rule**: Always clear detection layers before attempting analysis layers.
+**Rule**: Always clear detection layers before attempting analysis layers. When protection layers are opaque or static vs dynamic trade-offs are unclear up front, launch `flux` (`spine` static mapping + `probe` dynamic/emulation probe + `seam` anti-debug/boundary check) so concurrent tentacles share live `[FIELD Δ]` sideline pulses instead of serializing dead ends.
 
 ## 4. APPROACH SELECTION MATRIX
 

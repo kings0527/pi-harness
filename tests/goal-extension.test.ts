@@ -8,6 +8,7 @@ let originalCwd: string;
 let workDir: string;
 let handlers: Record<string, Array<(event: any, ctx: any) => any>>;
 let goalCommand: any;
+let goalTool: any;
 let boardTool: any;
 let entries: Array<{ type: string; data: any }>;
 let notifications: Array<{ sessionId: string; message: string; level: string }>;
@@ -93,6 +94,7 @@ before(async () => {
     },
     registerTool(tool: any) {
       if (tool.name === "board") boardTool = tool;
+      if (tool.name === "goal") goalTool = tool;
     },
     appendEntry(type: string, data: any) {
       entries.push({ type, data });
@@ -415,4 +417,58 @@ test("auto-continuation never fires for absent, paused, or achieved goals or abo
   assert.equal(goal.getGoal(sessionId)?.status, "achieved");
   await fire("agent_end", endEvent("stop"), ctx);
   assert.equal(sentSteers.length, 1, "achieved goal must not auto-continue");
+});
+
+test("LLM-callable goal tool activates session goal + auto-continuation without echo loop and blocks spawned tentacles", async () => {
+  assert.ok(goalTool, "goal tool must be registered");
+  const sessionId = "extension-goal-tool-flow";
+  const ctx = runtimeContext(sessionId);
+
+  const setRes = await goalTool.execute(
+    "gt1",
+    { action: "set", objective: "verify end-to-end replay" },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.match(setRes.content[0].text, /Session goal active/);
+  assert.equal(sentUserMessages.length, 0, "tool call must not echo a synthetic user message");
+  assert.equal(goal.getGoal(sessionId)?.status, "active");
+
+  // Auto-continuation works immediately after tool-created goal
+  await fire("agent_end", {
+    type: "agent_end",
+    messages: [{ role: "assistant", content: [], stopReason: "stop" }],
+  }, ctx);
+  assert.equal(sentSteers.length, 1);
+
+  const pauseRes = await goalTool.execute("gt2", { action: "pause" }, undefined, undefined, ctx);
+  assert.match(pauseRes.content[0].text, /Goal paused/);
+  assert.equal(goal.getGoal(sessionId)?.status, "paused");
+
+  const resumeRes = await goalTool.execute("gt3", { action: "resume" }, undefined, undefined, ctx);
+  assert.match(resumeRes.content[0].text, /Goal resumed/);
+  assert.equal(goal.getGoal(sessionId)?.status, "active");
+
+  const clearRes = await goalTool.execute("gt4", { action: "clear" }, undefined, undefined, ctx);
+  assert.match(clearRes.content[0].text, /Goal cleared/);
+  assert.equal(goal.getGoal(sessionId), null);
+
+  // Spawned Live Field tentacles are blocked from setting session goals
+  const prevActor = process.env.PI_FIELD_ACTOR;
+  process.env.PI_FIELD_ACTOR = "t1-spine";
+  try {
+    const blocked = await goalTool.execute(
+      "gt5",
+      { action: "set", objective: "should not stick" },
+      undefined,
+      undefined,
+      ctx,
+    );
+    assert.match(blocked.content[0].text, /Spawned Live Field tentacles/);
+    assert.equal(goal.getGoal(sessionId), null);
+  } finally {
+    if (prevActor === undefined) delete process.env.PI_FIELD_ACTOR;
+    else process.env.PI_FIELD_ACTOR = prevActor;
+  }
 });

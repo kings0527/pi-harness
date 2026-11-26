@@ -60,11 +60,22 @@ STATE_FILE = os.path.expanduser("~/.idapro/ida-mcp-daemon.json")
 DAEMON_LOG = os.path.expanduser("~/.idapro/ida-mcp-daemon.log")
 
 IDA_APP_GUESSES = [
+    # macOS
     "/Applications/iaa.app/Contents/MacOS",
     "/Applications/IDA Professional.app/Contents/MacOS",
     "/Applications/IDA Pro.app/Contents/MacOS",
     os.path.expanduser("~/Applications/iaa.app/Contents/MacOS"),
+    # Linux
+    os.path.expanduser("~/tools/ida-pro-9.4"),
+    os.path.expanduser("~/ida-pro-9.4"),
+    os.path.expanduser("~/ida-pro"),
+    "/opt/ida-pro-9.4",
+    "/opt/ida-pro",
+    "/opt/idapro",
 ]
+
+# Library file whose presence identifies an IDA install dir (any platform).
+IDALIB_NAMES = ("libidalib.dylib", "libidalib.so", "libida.dylib", "libida.so", "ida64.dll")
 
 
 # ------------------------------------------------------------------ transport
@@ -118,6 +129,15 @@ def _unwrap(resp):
     result = resp.get("result", {})
     if not isinstance(result, dict):
         return result
+    if result.get("isError"):
+        msg = None
+        content = result.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("text"):
+                    msg = item["text"]
+                    break
+        raise RuntimeError(msg or "tool call failed")
     sc = result.get("structuredContent")
     if sc is not None:
         return sc
@@ -140,12 +160,24 @@ def _call_raw(url, tool, arguments, timeout=TIMEOUT):
 
 
 # ------------------------------------------------------------------ IDA env
+def _is_ida_dir(d):
+    return bool(d) and any(os.path.exists(os.path.join(d, n)) for n in IDALIB_NAMES)
+
+
 def find_idadir():
     d = os.environ.get("IDADIR")
-    if d and os.path.exists(os.path.join(d, "libidalib.dylib")):
+    if _is_ida_dir(d):
         return d
+    # ida-config.json written by py-activate-idalib.py / ida GUI
+    try:
+        with open(os.path.expanduser("~/.idapro/ida-config.json")) as f:
+            d = json.load(f).get("Paths", {}).get("ida-install-dir")
+        if _is_ida_dir(d):
+            return d
+    except Exception:
+        pass
     for c in IDA_APP_GUESSES:
-        if os.path.exists(os.path.join(c, "libidalib.dylib")) or os.path.exists(os.path.join(c, "libida.dylib")):
+        if _is_ida_dir(c):
             return c
     return None
 
@@ -200,12 +232,16 @@ def _pid_alive(pid):
 
 def server_current_binary(url):
     """realpath of the binary the server currently has active, or None (e.g. GUI)."""
-    try:
-        cur = _call_raw(url, "idalib_current", {}, timeout=5)
+    # v2: server_health reports input_path; legacy v1: idalib_current
+    for tool in ("server_health", "idalib_current"):
+        try:
+            cur = _call_raw(url, tool, {}, timeout=5)
+        except Exception:
+            continue
         if isinstance(cur, dict):
-            return _rp(cur.get("input_path"))
-    except Exception:
-        pass
+            p = cur.get("input_path") or cur.get("idb_path")
+            if p:
+                return _rp(p)
     return None
 
 
@@ -250,8 +286,8 @@ def spawn_managed_daemon(binary=None):
     idadir = find_idadir()
     if not idadir:
         raise SystemExit(
-            "[ida] IDA install not found. Set IDADIR to the IDA app's Contents/MacOS "
-            "(the dir containing libidalib.dylib)."
+            "[ida] IDA install not found. Set IDADIR to the IDA install dir "
+            "(the dir containing libidalib.so / libidalib.dylib)."
         )
     py = find_python()
     if not _python_has_module(py):
@@ -300,6 +336,17 @@ def ensure_binary_loaded(url, binary_rp):
     """Make binary_rp the active session on a HEADLESS server (open/switch as needed)."""
     if server_current_binary(url) == binary_rp:
         return
+    # v2 (ida-pro-mcp >= 2.0): idb_open opens AND activates (or re-activates) the file.
+    # Long idle TTL so the managed daemon survives long agent sessions.
+    try:
+        _call_raw(url, "idb_open",
+                  {"input_path": binary_rp, "idle_ttl_sec": 86400},
+                  timeout=READY_TIMEOUT)
+        if server_current_binary(url) == binary_rp:
+            return
+    except Exception:
+        pass
+    # legacy v1 naming: idalib_list / idalib_switch / idalib_open
     try:
         listing = _call_raw(url, "idalib_list", {}, timeout=10)
         for s in (listing or {}).get("sessions", []):

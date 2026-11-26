@@ -19,15 +19,31 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Locate IDA install ------------------------------------------------------
 find_idadir() {
-  if [[ -n "${IDADIR:-}" && -f "$IDADIR/libidalib.dylib" ]]; then
+  if [[ -n "${IDADIR:-}" ]] && { [[ -f "$IDADIR/libidalib.dylib" ]] || [[ -f "$IDADIR/libidalib.so" ]]; }; then
     echo "$IDADIR"; return 0
   fi
+  # ida-config.json written by py-activate-idalib.py / ida GUI
+  local cfg="$HOME/.idapro/ida-config.json"
+  if [[ -f "$cfg" ]]; then
+    local d
+    d="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("Paths",{}).get("ida-install-dir") or "")' "$cfg" 2>/dev/null)"
+    if [[ -n "$d" ]] && { [[ -f "$d/libidalib.dylib" ]] || [[ -f "$d/libidalib.so" ]]; }; then
+      echo "$d"; return 0
+    fi
+  fi
+  local c
   for c in \
     "/Applications/iaa.app/Contents/MacOS" \
     "/Applications/IDA Professional.app/Contents/MacOS" \
     "/Applications/IDA Pro.app/Contents/MacOS" \
-    "$HOME/Applications/iaa.app/Contents/MacOS"; do
-    if [[ -f "$c/libidalib.dylib" || -f "$c/libida.dylib" ]]; then
+    "$HOME/Applications/iaa.app/Contents/MacOS" \
+    "$HOME/tools/ida-pro-9.4" \
+    "$HOME/ida-pro-9.4" \
+    "$HOME/ida-pro" \
+    "/opt/ida-pro-9.4" \
+    "/opt/ida-pro" \
+    "/opt/idapro"; do
+    if [[ -f "$c/libidalib.dylib" || -f "$c/libidalib.so" || -f "$c/libida.dylib" || -f "$c/libida.so" ]]; then
       echo "$c"; return 0
     fi
   done
@@ -54,9 +70,16 @@ case "$cmd" in
   install-idalib)
     idadir="$(find_idadir)" || { echo "ERROR: IDA install not found. Set IDADIR."; exit 1; }
     echo ">> IDADIR=$idadir"
-    if [[ -d "$idadir/idalib/python" ]]; then
+    whl="$(ls "$idadir"/idalib/python/idapro-*.whl 2>/dev/null | head -1)"
+    if [[ -n "$whl" ]]; then
+      echo ">> pip install $whl"
+      pip install --break-system-packages "$whl" 2>/dev/null || pip install "$whl"
+      echo ">> activating idalib"
+      python3 "$idadir/py-activate-idalib.py" -d "$idadir" || \
+        python3 "$idadir/idalib/python/py-activate-idalib.py" -d "$idadir" || true
+    elif [[ -d "$idadir/idalib/python" ]]; then
       echo ">> pip install $idadir/idalib/python"
-      pip install "$idadir/idalib/python"
+      pip install --break-system-packages "$idadir/idalib/python" 2>/dev/null || pip install "$idadir/idalib/python"
       echo ">> activating idalib"
       python3 "$idadir/py-activate-idalib.py" -d "$idadir" || \
         python3 "$idadir/idalib/python/py-activate-idalib.py" -d "$idadir" || true
@@ -80,6 +103,11 @@ case "$cmd" in
       echo "idapro mod  : importable (headless auto-start ready)"
     else
       echo "idapro mod  : NOT importable (run: setup.sh install-idalib)"
+    fi
+    if python3 -c "import ida_pro_mcp" 2>/dev/null; then
+      echo "ida_pro_mcp : importable"
+    else
+      echo "ida_pro_mcp : NOT importable (install v2: pip install git+https://github.com/mrexodia/ida-pro-mcp; PyPI 1.4.0 is SSE-only and incompatible)"
     fi
     loader="$HOME/.idapro/plugins/ida_mcp.py"
     if [[ -e "$loader" ]]; then echo "GUI plugin  : installed ($loader)"; else echo "GUI plugin  : not installed (optional; agents don't need it)"; fi

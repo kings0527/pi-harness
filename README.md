@@ -1,6 +1,6 @@
 # pi-harness
 
-> **pi-harness** is a [pi](https://github.com/earendil-works) extension package that gives a coding agent a shared cognitive layer: autonomous multi-agent collaboration (Board / spawn / storm / physarum), tiered long-term knowledge, and runtime-enforced engineering discipline. The core is runtime-agnostic TypeScript — it can migrate to other runtimes.
+> **pi-harness** is a [pi](https://github.com/earendil-works) extension package that gives a coding agent a shared cognitive layer: autonomous multi-agent collaboration (Board / spawn / storm / flux), tiered long-term knowledge, and runtime-enforced engineering discipline. The core is runtime-agnostic TypeScript — it can migrate to other runtimes.
 
 > Agent 的共享认知层——安装一个包，获得完整的多 agent 协作 + 长期记忆 + 工程纪律体系。
 
@@ -91,7 +91,6 @@ core/                ← 纯 Node.js，runtime 无关（零 pi import）
   events/            事件日志
   storage/           存储路径管理
 skills/distill/      ← 蒸馏工作流 skill
-skills/storm/        ← Storm 辩论 skill（按需加载）
 prompts/             ← 常驻 prompt（meta-principles + collaboration-doctrine）
 knowledge/           ← 当前 project 或共享 workspace 的知识存储
 ~/.pi-harness/knowledge/ ← 跨项目知识存储（scope=global）
@@ -154,7 +153,7 @@ npm run test        # node --test tests/**/*.test.ts
 
 ## 外部来源与致谢 (Attribution)
 
-- `skills/mattpocock/` — 来自 [Matt Pocock](https://github.com/mattpocock) 的 skills 集合（code-review / diagnosing-bugs / domain-modeling / implement / prototype / research / resolving-merge-conflicts / tdd / to-spec / writing-great-skills），用于补齐工程流程类 skill。
+- `skills/mattpocock/` — 吸收并本土化自 [Matt Pocock](https://github.com/mattpocock/skills) 的工程技能集（`codebase-design` / `code-review` / `diagnosing-bugs` / `grilling` / `prototype` / `retro` / `tdd` / `writing-for-agents`）。
 - 部分 security/reversing skills 包含来自 [Trail of Bits](https://www.trailofbits.com) 与 yaklang hack-skills 社区的材料，其许可文本完整保留于 `skills/LICENSE.trailofbits-skills`（CC BY-SA 4.0）与 `skills/LICENSE.yaklang-hack-skills`（MIT）。
 - 其余 skills、core、extensions、prompts、agents 均为本项目原创。
 

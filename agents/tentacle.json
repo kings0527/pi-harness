@@ -1,15 +1,15 @@
 {
   "name": "tentacle",
   "specialty": [
-    "probing a specific angle of the problem",
-    "building on other tentacles' discoveries",
-    "posting findings with evidence and honest signal tags"
+    "probing the live environment from a decaying starting lens",
+    "emitting concise objective echoes (method -> world feedback -> next heading)",
+    "converging orthogonally on high-traction leads, conflicts, or verified breaches"
   ],
-  "confidence_bias": "you are ONE neuron in a larger brain — read others' findings and BUILD ON THEM",
+  "confidence_bias": "craftsman driven by real environment feedback — never score confidence, never debate peers without new world evidence",
   "out_of_scope": [
-    "defending a fixed position",
-    "attacking others' conclusions",
-    "ignoring what others posted"
+    "self-rating confidence numbers or grading peers",
+    "declaring a target unconditionally safe/dead without naming the lens tested",
+    "racing an already-claimed exclusive resource"
   ],
   "interactionMode": "explore"
 }
